@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 The MegaMek Team. All Rights Reserved.
+ * Copyright (C) 2026 The MegaMek Team. All Rights Reserved.
  *
  * This file is part of MekBay.
  *
@@ -31,22 +31,22 @@
  * affiliated with Microsoft.
  */
 
-/*
- * Author: Drake
- */
+import type { Unit } from '../models/units.model';
+import { TagsService } from '../services/tags.service';
 
-/**
- * Mapping of MUL unit IDs to their sourcebook abbreviations.
- * The key is the MUL ID as a string, and the value is an array of sourcebook abbreviations.
- */
-export interface MULUnitSourcesData {
-    [mulId: string]: string[];
-}
+export function getChassisTagTargetUnits(units: Unit[], allUnits: Unit[]): Unit[] {
+    const chassisKeys = new Set(units.map(unit => TagsService.getChassisTagKey(unit)));
+    const unitsByName = new Map<string, Unit>();
 
-/**
- * Container for MUL unit sources data with versioning/caching info.
- */
-export interface MULUnitSources {
-    etag: string;
-    sources: MULUnitSourcesData;
+    for (const unit of allUnits) {
+        if (chassisKeys.has(TagsService.getChassisTagKey(unit))) {
+            unitsByName.set(unit.name, unit);
+        }
+    }
+
+    for (const unit of units) {
+        unitsByName.set(unit.name, unit);
+    }
+
+    return Array.from(unitsByName.values());
 }

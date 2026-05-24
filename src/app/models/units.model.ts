@@ -175,6 +175,47 @@ export interface UnitComponent {
     bay?: UnitComponent[];
     eq?: Equipment; // linked equipment data
 }
+
+export interface UnitTagEntry {
+    /** Tag display label */
+    tag: string;
+    /** Quantity for this tag assignment, defaults to 1 */
+    quantity: number;
+}
+
+export interface UnitFluffSystem {
+    label?: string;
+    manufacturer?: string;
+    model?: string;
+}
+
+export interface UnitImageFluff {
+    img?: string;
+}
+
+export interface UnitFluffCatalogEntry extends UnitImageFluff {
+    manufacturer?: string;
+    primaryFactory?: string;
+    capabilities?: string;
+    overview?: string;
+    deployment?: string;
+    history?: string;
+    notes?: string;
+    systems?: UnitFluffSystem[];
+}
+
+export interface UnitFluffCatalogMetadata {
+    version: string | number;
+    etag: string;
+    count: number;
+}
+
+export interface UnitFluffCatalog {
+    version: string | number;
+    etag: string;
+    fluff: Record<string, UnitFluffCatalogEntry>;
+}
+
 export interface Unit {
     name: string; // Internal unique name
     id: number; // MUL id
@@ -197,13 +238,17 @@ export interface Unit {
     engineRating: number;
     engineHS: number; // Number of HeatSinks on the engine
     engineHSType: string; // Type of HeatSinks on the engine: "Heat Sink", "Double Heat Sink", "Laser Heat Sink", etc...
-    source: string[];
+    source: string[]; // Sourcebook abbreviations exported from units.json.
+    published: string[]; // Record sheet source(s), e.g. "RS:AS".
+    canon: boolean; // True if the unit is canon, false if is not (e.g. alt-universe or april fools units)
     role: string;
     armorType: string;
     structureType: string;
     armor: number;
     armorPer: number; // Armor %
     internal: number;
+    squads?: number;
+    squadSize?: number;
     heat: number;
     dissipation: number;
     diss?: number[]; // Mix/Max dissipation
@@ -213,7 +258,6 @@ export interface Unit {
     run: number; // Without MASC systems
     run2: number; // Max possible
     jump: number;
-    jump2: number; // Max possible
     umu: number; // UMU movement points
     c3: string;
     dpt: number;
@@ -223,17 +267,7 @@ export interface Unit {
     quirks: string[];
     features: string[];
     icon: string;
-    fluff?: {
-        img?: string;
-        manufacturer?: string;
-        primaryFactory?: string;
-        capabilities?: string;
-        overview?: string;
-        deployment?: string;
-        history?: string;
-        notes?: string;
-        systems?: { label?: string, manufacturer?: string, model?: string }[];
-    };
+    fluff?: UnitImageFluff;
     cargo?: {
         n: number; // number of the cargo bay
         type: string; // type of cargo bay
@@ -259,8 +293,8 @@ export interface Unit {
     _mdSumNoPhysical: number; // Max damage sum for all weapons except physical
     _mdSumNoPhysicalNoOneshots: number; // Max damage sum for all weapons except physical, ignoring oneshots
     _era?: Era; // Cached era for this unit
-    _nameTags: string[]; // Tags assigned to this specific unit name
-    _chassisTags: string[]; // Tags assigned to the chassis (applies to all variants)
+    _nameTags: UnitTagEntry[]; // Quantity-aware tags assigned to this specific unit name
+    _chassisTags: UnitTagEntry[]; // Quantity-aware tags assigned to the chassis (applies to all variants)
     _publicTags?: PublicTagInfo[]; // Tags from other users (temporary or subscribed)
 }
 

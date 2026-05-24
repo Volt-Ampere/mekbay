@@ -465,7 +465,12 @@ interface ResolvedState {
 
 interface CIFragmentToken {
     readonly moveClass: NonNullable<ReturnType<typeof getCIMoveClass>>;
-    readonly allocations: readonly GroupUnitAllocation[];
+    readonly allocations: readonly CISquadAllocation[];
+}
+
+interface CISquadAllocation {
+    readonly unit: Unit;
+    readonly squads: number;
 }
 
 const ABSTRACT_UNIT_BUCKET_NAMES: readonly OrgUnitBucketName[] = [
@@ -775,6 +780,10 @@ function makeGroupName(type: string | null, modifierKey: string): string {
     return `${modifierKey}${type ?? 'Force'}`;
 }
 
+function getRuleDisplayName(rule: Pick<OrgRuleDefinition, 'type' | 'displayName'>): string {
+    return rule.displayName ?? rule.type;
+}
+
 function createLeafGroup(
     rule: OrgLeafCountRule | OrgLeafPatternRule,
     modifierStep: ModifierStep,
@@ -782,8 +791,9 @@ function createLeafGroup(
     formationMatchingIgnoredUnits: readonly Unit[] = [],
 ): GroupSizeResult {
     return {
-        name: makeGroupName(rule.type, modifierStep.modifierKey),
+        name: makeGroupName(getRuleDisplayName(rule), modifierStep.modifierKey),
         type: rule.type,
+        displayName: rule.displayName,
         modifierKey: modifierStep.modifierKey,
         countsAsType: rule.countsAs ?? null,
         tier: modifierStep.tier,
@@ -828,8 +838,9 @@ function createComposedGroup(
     children: readonly GroupSizeResult[],
 ): GroupSizeResult {
     return {
-        name: makeGroupName(rule.type, modifierStep.modifierKey),
+        name: makeGroupName(getRuleDisplayName(rule), modifierStep.modifierKey),
         type: rule.type,
+        displayName: rule.displayName,
         modifierKey: modifierStep.modifierKey,
         countsAsType: rule.countsAs ?? null,
         tier: modifierStep.tier,
@@ -847,10 +858,12 @@ function createAtomicGroupTemplate(
     tier: number,
     tag: GroupSizeResult['tag'],
     priority: GroupSizeResult['priority'],
+    displayName?: string,
 ): GroupSizeResult {
     return {
-        name: makeGroupName(type, modifierKey),
+        name: makeGroupName(displayName ?? type, modifierKey),
         type: type as GroupSizeResult['type'],
+        displayName,
         modifierKey,
         countsAsType,
         tier,
@@ -896,10 +909,7 @@ function buildAbstractGroupFactsFromUnits(
         descendantUnitBucketCounts.set(bucketName, new Map<OrgBucketValue, number>());
     }
 
-    const allocationByUnit = new Map(units.map((facts) => [facts.unit, unitAllocations?.find((allocation) => allocation.unit === facts.unit)?.troopers ?? facts.scalars.troopers]));
-
     for (const facts of units) {
-        const troopers = allocationByUnit.get(facts.unit) ?? facts.scalars.troopers;
         const unitType = getNormalizedOrgUnitType(facts.unit);
         unitTypeCounts.set(unitType, (unitTypeCounts.get(unitType) ?? 0) + 1);
         unitClassCounts.set(facts.classKey, (unitClassCounts.get(facts.classKey) ?? 0) + 1);
@@ -908,8 +918,7 @@ function buildAbstractGroupFactsFromUnits(
         }
         for (const [key, value] of Object.entries(facts.scalars)) {
             if (typeof value === 'number') {
-                const numericValue = key === 'troopers' ? troopers : value;
-                unitScalarSums.set(key as UnitNumericScalarName, (unitScalarSums.get(key as UnitNumericScalarName) ?? 0) + numericValue);
+                unitScalarSums.set(key as UnitNumericScalarName, (unitScalarSums.get(key as UnitNumericScalarName) ?? 0) + value);
             }
         }
         for (const bucketName of ABSTRACT_UNIT_BUCKET_NAMES) {
@@ -976,6 +985,7 @@ function createAbstractLeafGroupRecord(
         modifierStep.tier,
         rule.tag,
         rule.priority,
+        rule.displayName,
     );
     const facts = buildAbstractGroupFactsFromUnits(template, units);
 
@@ -1029,6 +1039,7 @@ function createAbstractCIParentRecord(
         modifierStep.tier,
         rule.tag,
         rule.priority,
+        rule.displayName,
     );
     const facts = buildAbstractGroupFactsFromUnits(template, units, allocations);
 
@@ -1189,16 +1200,33 @@ function makeFragmentGroupName(type: string, count: number): string {
     return makeCountedGroupName(type, count);
 }
 
+function getCISquadCount(unit: Unit): number {
+    const squads = unit.squads ?? 1;
+    return Number.isFinite(squads) ? Math.max(0, Math.floor(squads)) : 0;
+}
+
+function getAllocationSquadCount(allocation: CISquadAllocation | GroupUnitAllocation): number {
+    const squads = allocation.squads ?? getCISquadCount(allocation.unit);
+    return Number.isFinite(squads) ? Math.max(0, Math.floor(squads)) : 0;
+}
+
+function createCISquadAllocation(facts: UnitFacts): CISquadAllocation {
+    return { unit: facts.unit, squads: getCISquadCount(facts.unit) };
+}
+
 function aggregateTokenAllocations(tokens: readonly CIFragmentToken[]): GroupUnitAllocation[] {
-    const allocationByUnit = new Map<Unit, number>();
+    const squadsByUnit = new Map<Unit, number>();
 
     for (const token of tokens) {
         for (const allocation of token.allocations) {
-            allocationByUnit.set(allocation.unit, (allocationByUnit.get(allocation.unit) ?? 0) + allocation.troopers);
+            squadsByUnit.set(allocation.unit, (squadsByUnit.get(allocation.unit) ?? 0) + getAllocationSquadCount(allocation));
         }
     }
 
-    return Array.from(allocationByUnit.entries()).map(([unit, troopers]) => ({ unit, troopers }));
+    return Array.from(squadsByUnit.entries()).map(([unit, squads]) => ({
+        unit,
+        squads,
+    }));
 }
 
 function getUnitsFromAllocations(allocations: readonly GroupUnitAllocation[]): Unit[] {
@@ -1223,8 +1251,9 @@ function createCIParentGroup(
 ): GroupSizeResult {
     const unitAllocations = aggregateTokenAllocations(tokens);
     return {
-        name: makeGroupName(rule.type, modifierStep.modifierKey),
+        name: makeGroupName(getRuleDisplayName(rule), modifierStep.modifierKey),
         type: rule.type,
+        displayName: rule.displayName,
         modifierKey: modifierStep.modifierKey,
         countsAsType: rule.countsAs ?? null,
         tier: modifierStep.tier,
@@ -1258,69 +1287,27 @@ function createCIFragmentGroup(
     };
 }
 
-function partitionAllocationsToFragments(
+function createCIFragmentTokensFromSquadAllocations(
     moveClass: NonNullable<ReturnType<typeof getCIMoveClass>>,
-    allocations: readonly GroupUnitAllocation[],
-    troopersPerFragment: number,
-): { tokens: CIFragmentToken[]; leftoverAllocations: GroupUnitAllocation[] } {
-    const working = allocations
-        .filter((allocation) => allocation.troopers > 0)
-        .map((allocation) => ({ ...allocation }));
+    allocations: readonly CISquadAllocation[],
+): CIFragmentToken[] {
     const tokens: CIFragmentToken[] = [];
-    let allocationIndex = 0;
 
-    while (allocationIndex < working.length) {
-        const remainingTroopersAvailable = working
-            .slice(allocationIndex)
-            .reduce((sum, allocation) => sum + allocation.troopers, 0);
-        if (remainingTroopersAvailable < troopersPerFragment) {
-            break;
+    for (const allocation of allocations) {
+        let remainingSquads = getAllocationSquadCount(allocation);
+        while (remainingSquads > 0) {
+            tokens.push({
+                moveClass,
+                allocations: [{ unit: allocation.unit, squads: 1 }],
+            });
+            remainingSquads -= 1;
         }
-
-        let remainingTroopers = troopersPerFragment;
-        const fragmentAllocations: GroupUnitAllocation[] = [];
-        let cursor = allocationIndex;
-
-        while (cursor < working.length && remainingTroopers > 0) {
-            const allocation = working[cursor];
-            if (allocation.troopers <= 0) {
-                cursor += 1;
-                continue;
-            }
-
-            const consumedTroopers = Math.min(allocation.troopers, remainingTroopers);
-            fragmentAllocations.push({ unit: allocation.unit, troopers: consumedTroopers });
-            allocation.troopers -= consumedTroopers;
-            remainingTroopers -= consumedTroopers;
-
-            if (allocation.troopers <= 0) {
-                cursor += 1;
-            }
-        }
-
-        if (remainingTroopers > 0) {
-            break;
-        }
-
-        while (allocationIndex < working.length && working[allocationIndex].troopers <= 0) {
-            allocationIndex += 1;
-        }
-
-        tokens.push({
-            moveClass,
-            allocations: fragmentAllocations,
-        });
     }
 
-    return {
-        tokens,
-        leftoverAllocations: working
-            .filter((allocation) => allocation.troopers > 0)
-            .map((allocation) => ({ unit: allocation.unit, troopers: allocation.troopers })),
-    };
+    return tokens;
 }
 
-function getMoveClassFromAllocations(allocations: readonly GroupUnitAllocation[]): NonNullable<ReturnType<typeof getCIMoveClass>> | null {
+function getMoveClassFromAllocations(allocations: readonly (CISquadAllocation | GroupUnitAllocation)[]): NonNullable<ReturnType<typeof getCIMoveClass>> | null {
     const moveClasses = new Set(
         allocations
             .map((allocation) => getCIMoveClass(allocation.unit))
@@ -1331,16 +1318,10 @@ function getMoveClassFromAllocations(allocations: readonly GroupUnitAllocation[]
 }
 
 function sliceAllocationsToTokens(
-    allocations: readonly GroupUnitAllocation[],
+    allocations: readonly CISquadAllocation[],
     moveClass: NonNullable<ReturnType<typeof getCIMoveClass>>,
-    troopersPerFragment: number,
 ): CIFragmentToken[] | null {
-    const partitioned = partitionAllocationsToFragments(moveClass, allocations, troopersPerFragment);
-    if (partitioned.leftoverAllocations.length > 0) {
-        return null;
-    }
-
-    return partitioned.tokens;
+    return createCIFragmentTokensFromSquadAllocations(moveClass, allocations);
 }
 
 function getModifierStepForGroup(
@@ -1356,8 +1337,9 @@ function getCIFragmentTokensFromGroup(
     group: GroupSizeResult,
     entryByMoveClass: ReadonlyMap<NonNullable<ReturnType<typeof getCIMoveClass>>, OrgCIFormationEntry>,
 ): CIFragmentToken[] | null {
-    const allocations = group.unitAllocations
-        ?? group.units?.map((unit) => ({ unit, troopers: unit.internal || 0 }))
+    const allocations: CISquadAllocation[] = group.unitAllocations
+        ?.map((allocation) => ({ unit: allocation.unit, squads: getAllocationSquadCount(allocation) }))
+        ?? group.units?.map((unit) => ({ unit, squads: getCISquadCount(unit) }))
         ?? [];
     if (allocations.length === 0) {
         return null;
@@ -1374,7 +1356,7 @@ function getCIFragmentTokensFromGroup(
     }
 
     if (group.isFragment || group.type === rule.fragmentType) {
-        const tokens = sliceAllocationsToTokens(allocations, moveClass, entry.troopers);
+        const tokens = sliceAllocationsToTokens(allocations, moveClass);
         if (!tokens) {
             return null;
         }
@@ -1391,7 +1373,7 @@ function getCIFragmentTokensFromGroup(
         return null;
     }
 
-    const tokens = sliceAllocationsToTokens(allocations, moveClass, entry.troopers);
+    const tokens = sliceAllocationsToTokens(allocations, moveClass);
     if (!tokens) {
         return null;
     }
@@ -1464,16 +1446,16 @@ export function evaluateCIFormationRule(
     const entryByMoveClass = new Map(rule.entries.map((entry) => [entry.moveClass, entry]));
     let leftoverCount = 0;
 
-    const allocationsByMoveClass = new Map<NonNullable<ReturnType<typeof getCIMoveClass>>, GroupUnitAllocation[]>();
+    const allocationsByMoveClass = new Map<NonNullable<ReturnType<typeof getCIMoveClass>>, CISquadAllocation[]>();
     for (const facts of eligibleUnits) {
         const moveClass = getCIMoveClass(facts.unit);
-        if (!moveClass || !entryByMoveClass.has(moveClass)) {
+        const allocation = createCISquadAllocation(facts);
+        if (!moveClass || !entryByMoveClass.has(moveClass) || allocation.squads <= 0) {
             leftoverCount += 1;
             continue;
         }
 
         const existing = allocationsByMoveClass.get(moveClass);
-        const allocation = { unit: facts.unit, troopers: facts.scalars.troopers };
         if (existing) {
             existing.push(allocation);
         } else {
@@ -1486,11 +1468,7 @@ export function evaluateCIFormationRule(
         if (!entry) {
             continue;
         }
-        const partitioned = partitionAllocationsToFragments(moveClass, allocations, entry.troopers);
-        const tokens = partitioned.tokens;
-        if (partitioned.leftoverAllocations.length > 0) {
-            leftoverCount += partitioned.leftoverAllocations.length;
-        }
+        const tokens = createCIFragmentTokensFromSquadAllocations(moveClass, allocations);
         const descriptor = getCIEntryDescriptor(rule, entry);
         let remaining = tokens.length;
         for (const step of descriptor.stepsDescending) {
@@ -1533,17 +1511,17 @@ export function materializeCIFormationRule(
     const entryByMoveClass = new Map(rule.entries.map((entry) => [entry.moveClass, entry]));
     const leftoverUnitFacts: UnitFacts[] = [];
     const leftoverUnitAllocations: GroupUnitAllocation[] = [];
-    const allocationsByMoveClass = new Map<NonNullable<ReturnType<typeof getCIMoveClass>>, GroupUnitAllocation[]>();
+    const allocationsByMoveClass = new Map<NonNullable<ReturnType<typeof getCIMoveClass>>, CISquadAllocation[]>();
 
     for (const facts of eligibleUnits) {
         const moveClass = getCIMoveClass(facts.unit);
-        if (!moveClass || !entryByMoveClass.has(moveClass)) {
+        const allocation = createCISquadAllocation(facts);
+        if (!moveClass || !entryByMoveClass.has(moveClass) || allocation.squads <= 0) {
             leftoverUnitFacts.push(facts);
             continue;
         }
 
         const existing = allocationsByMoveClass.get(moveClass);
-        const allocation = { unit: facts.unit, troopers: facts.scalars.troopers };
         if (existing) {
             existing.push(allocation);
         } else {
@@ -1557,9 +1535,7 @@ export function materializeCIFormationRule(
         if (!entry) {
             continue;
         }
-        const partitioned = partitionAllocationsToFragments(moveClass, allocations, entry.troopers);
-        const tokens = partitioned.tokens;
-        leftoverUnitAllocations.push(...partitioned.leftoverAllocations);
+        const tokens = createCIFragmentTokensFromSquadAllocations(moveClass, allocations);
         groups.push(...materializeCIFormationTokens(rule, tokens, entry));
     }
 
@@ -1582,17 +1558,17 @@ function materializeCIFormationRuleRecords(
     const unitFactsByUnit = new Map(eligibleUnits.map((facts) => [facts.unit, facts]));
     const leftoverUnitFacts: UnitFacts[] = [];
     const leftoverUnitAllocations: GroupUnitAllocation[] = [];
-    const allocationsByMoveClass = new Map<NonNullable<ReturnType<typeof getCIMoveClass>>, GroupUnitAllocation[]>();
+    const allocationsByMoveClass = new Map<NonNullable<ReturnType<typeof getCIMoveClass>>, CISquadAllocation[]>();
 
     for (const facts of eligibleUnits) {
         const moveClass = getCIMoveClass(facts.unit);
-        if (!moveClass || !entryByMoveClass.has(moveClass)) {
+        const allocation = createCISquadAllocation(facts);
+        if (!moveClass || !entryByMoveClass.has(moveClass) || allocation.squads <= 0) {
             leftoverUnitFacts.push(facts);
             continue;
         }
 
         const existing = allocationsByMoveClass.get(moveClass);
-        const allocation = { unit: facts.unit, troopers: facts.scalars.troopers };
         if (existing) {
             existing.push(allocation);
         } else {
@@ -1606,9 +1582,8 @@ function materializeCIFormationRuleRecords(
         if (!entry) {
             continue;
         }
-        const partitioned = partitionAllocationsToFragments(moveClass, allocations, entry.troopers);
-        leftoverUnitAllocations.push(...partitioned.leftoverAllocations);
-        records.push(...materializeCIFormationTokenRecords(rule, partitioned.tokens, entry, unitFactsByUnit));
+        const tokens = createCIFragmentTokensFromSquadAllocations(moveClass, allocations);
+        records.push(...materializeCIFormationTokenRecords(rule, tokens, entry, unitFactsByUnit));
     }
 
     return {
@@ -4620,7 +4595,8 @@ function createUpdatedParentRecord(
                 const baseGroup = parentRecord.materialize();
                 updatedRecord.materializedGroup = {
                     ...baseGroup,
-                    name: makeGroupName(rule.type, modifierStep.modifierKey),
+                    name: makeGroupName(getRuleDisplayName(rule), modifierStep.modifierKey),
+                    displayName: rule.displayName,
                     modifierKey: modifierStep.modifierKey,
                     tier: modifierStep.tier,
                     children: [
@@ -5346,8 +5322,9 @@ function createSyntheticGroupForRule(
     modifierStep: ModifierStep,
 ): GroupSizeResult {
     return {
-        name: makeGroupName(rule.type, modifierStep.modifierKey),
+        name: makeGroupName(getRuleDisplayName(rule), modifierStep.modifierKey),
         type: rule.type,
+        displayName: rule.displayName,
         modifierKey: modifierStep.modifierKey,
         countsAsType: rule.countsAs ?? null,
         tier: modifierStep.tier,
@@ -5373,8 +5350,9 @@ function createAbstractProducedGroupTemplate(
     modifierStep: ModifierStep,
 ): GroupSizeResult {
     return {
-        name: makeGroupName(rule.type, modifierStep.modifierKey),
+        name: makeGroupName(getRuleDisplayName(rule), modifierStep.modifierKey),
         type: rule.type,
+        displayName: rule.displayName,
         modifierKey: modifierStep.modifierKey,
         countsAsType: rule.countsAs ?? null,
         tier: modifierStep.tier,

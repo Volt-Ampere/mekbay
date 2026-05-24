@@ -60,6 +60,7 @@ export type OrgType =
     | 'Flight'
     | 'Squadron'
     | 'Wing'
+    | 'Aero Lance'
     | 'Lance'
     | 'Air Lance'
     | 'Company'
@@ -107,7 +108,20 @@ export type OrgType =
     | 'Augmented Lance'
     | 'Augmented Company'
     | 'Augmented Battalion'
-    | 'Augmented Regiment';
+    | 'Augmented Regiment'
+
+    // SLDF-specific types
+    | 'Division'
+    | 'Corps'
+    | 'Army'
+    | 'Army Group'
+    | 'Group'
+    | 'Vessel'
+    | 'Flotilla'
+    | 'Naval Division'
+    | 'Naval Squadron'
+    | 'Fleet'
+    ;
 
 export interface PointRange {
     min: number;
@@ -124,6 +138,7 @@ export interface GroupSizeResult {
     isFragment?: boolean;
     provenance?: OrgGroupProvenance;
     foreignDisplayName?: string;
+    displayName?: string;
     children?: GroupSizeResult[];
     units?: Unit[];
     unitAllocations?: GroupUnitAllocation[];
@@ -136,7 +151,7 @@ export interface GroupSizeResult {
 
 export interface GroupUnitAllocation {
     readonly unit: Unit;
-    readonly troopers: number;
+    readonly squads?: number;
 }
 
 export type OrgGroupProvenance = 'input-group' | 'produced-group';
@@ -343,6 +358,7 @@ export interface OrgConstraintSpec {
 
 export interface OrgRuleMetadata {
     readonly type: OrgType;
+    readonly displayName?: string;
     readonly modifiers: Record<string, number | OrgTypeModifier>;
     readonly commandRank?: string;
     readonly tier: number;
@@ -380,7 +396,6 @@ export interface OrgComposedCountAlternativeSpec {
 
 export interface OrgCIFormationEntry {
     readonly moveClass: CIMoveClass;
-    readonly troopers: number;
     readonly counts: Readonly<Record<string, number>>;
 }
 

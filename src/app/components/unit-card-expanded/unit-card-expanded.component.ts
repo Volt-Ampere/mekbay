@@ -54,6 +54,7 @@ import { FilterAmmoPipe } from '../../pipes/filter-ammo.pipe';
 import { ExpandedComponentsPipe } from '../../pipes/expanded-components.pipe';
 import { TooltipDirective } from '../../directives/tooltip.directive';
 import { type SearchTokensGroup, highlightMatches } from '../../utils/search.util';
+import { formatASDamageValue, isASDamageFilterKey } from '../../utils/as-damage.util';
 import type { TooltipLine } from '../tooltip/tooltip.component';
 import {
     MEGAMEK_AVAILABILITY_BADGE_COLORS,
@@ -105,9 +106,9 @@ export class UnitCardExpandedComponent {
     private abilityLookup = inject(AsAbilityLookupService);
     private expandedComponentsPipe = new ExpandedComponentsPipe();
     readonly unitTypeDisplayNames = AS_TYPE_DISPLAY_NAMES;
-    readonly megaMekProductionIconPath = MEGAMEK_PRODUCTION_ICON_PATH;
+    readonly megaMekRequisitionIconPath = MEGAMEK_PRODUCTION_ICON_PATH;
     readonly megaMekSalvageIconPath = MEGAMEK_SALVAGE_ICON_PATH;
-    readonly megaMekRarityProductionSortKey = MEGAMEK_RARITY_PRODUCTION_SORT_KEY;
+    readonly megaMekRarityRequisitionSortKey = MEGAMEK_RARITY_PRODUCTION_SORT_KEY;
     readonly megaMekRaritySalvageSortKey = MEGAMEK_RARITY_SALVAGE_SORT_KEY;
 
     /** 
@@ -373,7 +374,7 @@ export class UnitCardExpandedComponent {
         if (raw == null) {
             value = '—';
         } else if (typeof raw === 'number') {
-            value = FormatNumberPipe.formatValue(raw, true, false);
+            value = isASDamageFilterKey(key) ? formatASDamageValue(raw) : FormatNumberPipe.formatValue(raw, true, false);
         } else {
             value = String(raw);
         }
@@ -508,7 +509,7 @@ export class UnitCardExpandedComponent {
         if (raw == null) {
             value = '—';
         } else if (typeof raw === 'number') {
-            value = FormatNumberPipe.formatValue(raw, true, false);
+            value = isASDamageFilterKey(sortKey) ? formatASDamageValue(raw) : FormatNumberPipe.formatValue(raw, true, false);
             numeric = true;
         } else {
             value = String(raw);

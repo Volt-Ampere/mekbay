@@ -1,3 +1,36 @@
+/*
+ * Copyright (C) 2026 The MegaMek Team. All Rights Reserved.
+ *
+ * This file is part of MekBay.
+ *
+ * MekBay is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License (GPL),
+ * version 3 or (at your option) any later version,
+ * as published by the Free Software Foundation.
+ *
+ * MekBay is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * A copy of the GPL should have been included with this project;
+ * if not, see <https://www.gnu.org/licenses/>.
+ *
+ * NOTICE: The MegaMek organization is a non-profit group of volunteers
+ * creating free software for the BattleTech community.
+ *
+ * MechWarrior, BattleMech, `Mech and AeroTech are registered trademarks
+ * of The Topps Company, Inc. All Rights Reserved.
+ *
+ * Catalyst Game Labs and the Catalyst Game Labs logo are trademarks of
+ * InMediaRes Productions, LLC.
+ *
+ * MechWarrior Copyright Microsoft Corporation. MegaMek was created under
+ * Microsoft's "Game Content Usage Rules"
+ * <https://www.xbox.com/en-US/developers/rules> and it is not endorsed by or
+ * affiliated with Microsoft.
+ */
+
 import { CommonModule } from '@angular/common';
 import {
     ChangeDetectionStrategy,
@@ -13,6 +46,7 @@ import {
     viewChild,
 } from '@angular/core';
 
+import { MeasureClampOverflowDirective } from '../../directives/measure-clamp-overflow.directive';
 import {
     getForcePreviewResolvedUnits,
     getForcePreviewUnitPilotStats,
@@ -24,11 +58,18 @@ import type { Options } from '../../models/options.model';
 import type { Unit } from '../../models/units.model';
 import { CleanModelStringPipe } from '../../pipes/clean-model-string.pipe';
 import { DialogsService } from '../../services/dialogs.service';
+import { ForceTaggingService } from '../../services/force-tagging.service';
 import { OptionsService } from '../../services/options.service';
 import { LanceTypeIdentifierUtil } from '../../utils/lance-type-identifier.util';
-import { NO_FORMATION_ID } from '../../utils/formation-type.model';
+import {
+    NOTE_PREVIEW_LINE_COUNT,
+    hasVisibleNoteText,
+} from '../../utils/note-preview.util';
+import { formationNameMatchesGroupName, NO_FORMATION_ID, type FormationTypeDefinition } from '../../utils/formation-type.model';
 import { getOrgFromForce, getOrgFromGroup } from '../../utils/org/org-namer.util';
+import { FormationInfoDialogComponent, type FormationInfoDialogData } from '../formation-info-dialog/formation-info-dialog.component';
 import { UnitDetailsDialogComponent, type UnitDetailsDialogData } from '../unit-details-dialog/unit-details-dialog.component';
+import { ForceTagsComponent, type ForceTagClickEvent } from '../force-tags/force-tags.component';
 import { UnitIconComponent } from '../unit-icon/unit-icon.component';
 
 const UNIT_TILE_MIN_WIDTH = 86;
@@ -39,7 +80,7 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
 @Component({
     selector: 'force-preview-panel',
     standalone: true,
-    imports: [CommonModule, CleanModelStringPipe, UnitIconComponent],
+    imports: [CommonModule, CleanModelStringPipe, MeasureClampOverflowDirective, UnitIconComponent, ForceTagsComponent],
     changeDetection: ChangeDetectionStrategy.OnPush,
     template: `
     @let unitDisplayName = effectiveUnitDisplayName();
@@ -64,27 +105,73 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
                     }
                 </div>
             </div>
-            <span class="force-preview-info">
-                <span class="game-type-badge" [class.as]="entry.type === 'as'">
-                    {{ entry.type === 'as' ? 'AS' : 'CBT' }}
+            <div class="force-preview-info">
+                <span class="force-preview-meta">
+                    <span class="game-type-badge" [class.as]="entry.type === 'as'">
+                        {{ entry.type === 'as' ? 'AS' : 'CBT' }}
+                    </span>
+                    @if (entry.type === 'as') {
+                        @if (entry.pv && entry.pv > 0) {
+                            <span class="force-bv">PV: {{ entry.pv | number }}</span>
+                        }
+                    } @else {
+                        @if (entry.bv && entry.bv > 0) {
+                            <span class="force-bv">BV: {{ entry.bv | number }}</span>
+                        }
+                    }
                 </span>
-                @if (entry.type === 'as') {
-                    @if (entry.pv && entry.pv > 0) {
-                        <span class="force-bv">PV: {{ entry.pv | number }}</span>
-                    }
-                } @else {
-                    @if (entry.bv && entry.bv > 0) {
-                        <span class="force-bv">BV: {{ entry.bv | number }}</span>
-                    }
-                }
-            </span>
+            </div>
+            @if (showEditableForceTags()) {
+                <force-tags
+                    class="force-preview-tags"
+                    [force]="entry"
+                    [mode]="'full'"
+                    [editable]="true"
+                    [tagsVersion]="forceTagsVersion()"
+                    (tagClick)="onForceTagClick($event)">
+                </force-tags>
+            }
         </div>
         }
         <div #forcePreviewViewport class="force-preview">
+            @if (showNote() && hasVisibleNote(entry.note)) {
+            @let noteIsExpandable = noteOverflowing();
+            <div class="force-preview-note-shell">
+                @if (noteIsExpandable) {
+                <button
+                    type="button"
+                    class="force-preview-note-toggle"
+                    [attr.aria-expanded]="noteExpanded()"
+                    (click)="toggleNoteExpanded()">
+                    <svg class="chevron" width="12px" height="12px" fill="currentColor" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg" [class.collapsed]="!noteExpanded()">
+                        <path d="M0 2l5 6 5-6z"/>
+                    </svg>
+                    <span
+                        class="force-preview-note-summary"
+                        [class.clamped]="!noteExpanded()"
+                        [measureClampOverflow]="entry.note ?? ''"
+                        [measureClampOverflowLines]="notePreviewLineCount"
+                        (measureClampOverflowChange)="onNoteOverflowChange($event)">{{ entry.note }}</span>
+                </button>
+                } @else {
+                <div class="force-preview-note-static">
+                    <span
+                        class="force-preview-note-summary"
+                        [class.clamped]="true"
+                        [measureClampOverflow]="entry.note ?? ''"
+                        [measureClampOverflowLines]="notePreviewLineCount"
+                        (measureClampOverflowChange)="onNoteOverflowChange($event)">{{ entry.note }}</span>
+                </div>
+                }
+            </div>
+            }
             <div class="unit-scroll">
                 @for (gd of groupDisplayData(); track gd.group) {
                 <div class="unit-group">
-                    <div class="group-name">{{ gd.name }}
+                    <div class="group-name">
+                        @if (gd.name) {
+                            <span>{{ gd.name }}</span>
+                        }
                         @if (gd.formationName; as formationName) {
                             @if (gd.name) { <span class="group-sep">·</span> }
                             <span class="group-formation">{{ formationName }}</span>
@@ -92,6 +179,16 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
                         @if (gd.orgName; as orgName) {
                             @if (gd.name || gd.formationName) { <span class="group-sep">·</span> }
                             <span class="group-org">{{ orgName }}</span>
+                        }
+                        @if (gd.formation; as formation) {
+                            <button
+                                class="btn-formation-info"
+                                type="button"
+                                title="Formation info"
+                                [attr.aria-label]="'Formation info: ' + formation.name"
+                                (click)="showFormationInfo($event, gd.group, formation, gd.formationDisplayName)">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                            </button>
                         }
                     </div>
                     <div class="units">
@@ -209,18 +306,24 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
         }
 
         .force-preview-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: first baseline;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-areas:
+                "name meta"
+                "tags tags";
+            gap: 4px 8px;
+            align-items: start;
             margin-bottom: 8px;
         }
 
         .faction-name-wrapper {
+            grid-area: name;
             display: flex;
             align-items: first baseline;
             gap: 4px;
             flex-direction: row;
             flex: 1 1 0;
+            min-width: 0;
         }
 
         .faction-icon,
@@ -236,6 +339,7 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
             display: flex;
             flex-direction: column;
             text-align: left;
+            min-width: 0;
         }
 
         .force-preview-name {
@@ -249,18 +353,100 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
         }
 
         .force-preview-info {
+            grid-area: meta;
             display: flex;
-            gap: 8px;
-            align-items: first baseline;
+            flex-direction: column;
+            gap: 4px;
+            align-items: flex-end;
             font-size: 0.85em;
             color: var(--text-color-secondary);
         }
 
+        .force-preview-meta {
+            display: flex;
+            gap: 8px;
+            align-items: first baseline;
+            justify-content: flex-end;
+        }
+
+        .force-preview-tags {
+            grid-area: tags;
+            justify-self: stretch;
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+        }
+
+        .force-preview-note-shell {
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 8px;
+        }
+
+        .force-preview-note-toggle {
+            display: flex;
+            align-items: flex-start;
+            gap: 4px;
+            width: 100%;
+            padding: 4px;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            cursor: pointer;
+            text-align: left;
+        }
+
+        .force-preview-note-toggle:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .force-preview-note-static {
+            display: flex;
+            align-items: flex-start;
+            gap: 4px;
+            width: 100%;
+            padding: 4px;
+            box-sizing: border-box;
+        }
+
+        .force-preview-note-summary {
+            display: block;
+            flex: 1 1 auto;
+            color: var(--text-color-secondary);
+            font-size: 0.75em;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            min-width: 0;
+        }
+
+        .force-preview-note-summary.clamped {
+            display: -webkit-box;
+            line-clamp: 2;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .chevron {
+            color: var(--text-color-secondary);
+            transition: transform 0.15s ease;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        .chevron.collapsed {
+            transform: rotate(-90deg);
+        }
+
         .game-type-badge {
-            font-size: 0.8em;
+            font-size: 0.7em;
             font-weight: bold;
-            padding: 2px 6px;
+            padding: 1px 5px;
             background: #a2792c;
+            border: 1px solid #a2792c;
             color: #fff;
             text-transform: uppercase;
             flex-shrink: 0;
@@ -269,6 +455,7 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
 
         .game-type-badge.as {
             background: #811313;
+            border: 1px solid #811313;
         }
 
         .force-bv {
@@ -305,6 +492,28 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
             font-size: 0.8em;
             color: var(--text-color-secondary);
             text-align: left;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0 2px;
+        }
+
+        .btn-formation-info {
+            flex-shrink: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: none;
+            border: none;
+            color: var(--text-color-tertiary);
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 50%;
+            transition: color 0.15s;
+        }
+
+        .btn-formation-info:hover {
+            color: var(--bt-yellow);
         }
 
         .units {
@@ -538,6 +747,7 @@ type ForcePreviewSelectionMode = 'multi' | 'single';
 })
 export class ForcePreviewPanelComponent {
     private readonly dialogsService = inject(DialogsService);
+    private readonly forceTaggingService = inject(ForceTaggingService);
     readonly optionsService = inject(OptionsService);
     private readonly forcePreviewViewport = viewChild<ElementRef<HTMLElement>>('forcePreviewViewport');
     private readonly previewViewportWidth = signal(UNIT_TILE_MAX_WIDTH);
@@ -545,6 +755,7 @@ export class ForcePreviewPanelComponent {
     readonly force = input.required<ForcePreviewEntry>();
     readonly showHeader = input(true);
     readonly showHint = input(true);
+    readonly showNote = input(true);
     readonly scrollUnitsOnly = input(false);
     readonly showLockControls = input(false);
     readonly showSelectionControls = input(false);
@@ -552,9 +763,12 @@ export class ForcePreviewPanelComponent {
     readonly displayMode = input<Options['unitDisplayName'] | null>(null);
     readonly lockedUnitKeys = input<ReadonlySet<string>>(new Set<string>());
     readonly lockToggle = input<((unitEntry: ForcePreviewUnit) => void) | null>(null);
+    readonly variantChange = input<((unitEntry: ForcePreviewUnit, variant: Unit) => void) | null>(null);
     readonly hoveredUnitChange = output<ForcePreviewUnit | null>();
     readonly selectedUnitsChange = output<ForcePreviewUnit[]>();
     private readonly selectedUnits = signal<ReadonlySet<ForcePreviewUnit>>(new Set<ForcePreviewUnit>());
+    readonly noteExpanded = signal(false);
+    readonly forceTagsVersion = signal(0);
 
     readonly unitColumnCount = computed(() => {
         const viewportWidth = Math.max(this.previewViewportWidth(), UNIT_TILE_MIN_WIDTH);
@@ -575,28 +789,40 @@ export class ForcePreviewPanelComponent {
     );
 
     readonly resolvedUnits = computed<Unit[]>(() => getForcePreviewResolvedUnits(this.force()));
+    readonly notePreviewLineCount = NOTE_PREVIEW_LINE_COUNT;
+    readonly noteOverflowing = signal(false);
 
     readonly forceOrgName = computed(() => {
         const result = getOrgFromForce(this.force());
         return result.name !== 'Force' ? result.name : null;
     });
 
-    readonly groupDisplayData = computed(() => this.force().groups.map((group: ForcePreviewGroup) => {
-        const sizeResult = getOrgFromGroup(group);
-        const orgName = sizeResult.name && sizeResult.name !== 'Force' ? sizeResult.name : null;
+    readonly showEditableForceTags = computed(() => {
+        const entry = this.force();
+        return !!entry.instanceId && entry.owned;
+    });
 
-        const name = group.name || LanceTypeIdentifierUtil.getFormationName(group.formationId) || '';
+    readonly groupDisplayData = computed(() => {
+        const entry = this.force();
+        return entry.groups.map((group: ForcePreviewGroup) => {
+            const sizeResult = getOrgFromGroup(group);
+            const orgName = sizeResult.name && sizeResult.name !== 'Force' ? sizeResult.name : null;
+            const formation = this.getPreviewFormation(group, entry.type);
+            const formationDisplayName = formation ? this.getPreviewFormationDisplayName(formation, orgName) : null;
+            const displayOrgName = formation ? null : orgName;
 
-        let formationName: string | null = null;
-        if (group.formationId && group.formationId !== NO_FORMATION_ID && group.name) {
-            const candidateFormationName = LanceTypeIdentifierUtil.getFormationName(group.formationId);
-            if (candidateFormationName && !group.name.includes(candidateFormationName)) {
-                formationName = candidateFormationName;
+            const name = group.name || formationDisplayName || '';
+
+            let formationName: string | null = null;
+            if (formation && formationDisplayName && group.name) {
+                if (!formationNameMatchesGroupName(formation, group.name)) {
+                    formationName = formationDisplayName;
+                }
             }
-        }
 
-        return { group, name, orgName, formationName };
-    }));
+            return { group, name, orgName: displayOrgName, formationName, formation, formationDisplayName };
+        });
+    });
 
     constructor() {
         effect((onCleanup) => {
@@ -619,6 +845,19 @@ export class ForcePreviewPanelComponent {
             resizeObserver.observe(viewport);
 
             onCleanup(() => resizeObserver.disconnect());
+        });
+
+        effect(() => {
+            const force = this.force();
+            const showNote = this.showNote();
+            void force.instanceId;
+            void force.note;
+            void showNote;
+
+            untracked(() => {
+                this.noteExpanded.set(false);
+                this.noteOverflowing.set(false);
+            });
         });
 
         effect(() => {
@@ -645,18 +884,79 @@ export class ForcePreviewPanelComponent {
 
         const unitList = this.resolvedUnits();
         const unitIndex = unitList.findIndex((unit: Unit) => unit === loadForceUnit.unit || unit.name === loadForceUnit.unit?.name);
+        const variantChange = this.variantChange();
         this.dialogsService.createDialog(UnitDetailsDialogComponent, {
             data: {
                 unitList,
                 unitIndex: unitIndex >= 0 ? unitIndex : 0,
                 hideAddButton: true,
                 gameSystem: this.force().type,
+                changeAction: variantChange ? {
+                    originalUnit: loadForceUnit.unit,
+                    apply: (variant: Unit) => variantChange(loadForceUnit, variant),
+                    closeParentOnChange: true,
+                } : undefined,
+                showChangeButton: false,
             } satisfies UnitDetailsDialogData,
+        });
+    }
+
+    async onForceTagClick({ force, event }: ForceTagClickEvent): Promise<void> {
+        event.stopPropagation();
+        const target = (event.currentTarget as HTMLElement) || (event.target as HTMLElement);
+        const anchorElement = (target.closest('.add-tag-btn') as HTMLElement) || target;
+
+        await this.forceTaggingService.openForceTagSelector([force], anchorElement, {
+            updateCloud: force.cloud ?? true,
+            onTagsChanged: () => this.forceTagsVersion.update(version => version + 1),
+        });
+    }
+
+    showFormationInfo(
+        event: MouseEvent,
+        group: ForcePreviewGroup,
+        formation: FormationTypeDefinition,
+        formationDisplayName: string | null,
+    ): void {
+        event.stopPropagation();
+        this.dialogsService.createDialog(FormationInfoDialogComponent, {
+            data: {
+                formation,
+                gameSystem: this.force().type,
+                formationDisplayName: formationDisplayName ?? formation.name,
+                unitCount: group.units.length,
+            } satisfies FormationInfoDialogData,
         });
     }
 
     onUnitHover(loadForceUnit: ForcePreviewUnit | null): void {
         this.hoveredUnitChange.emit(loadForceUnit?.unit ? loadForceUnit : null);
+    }
+
+    private getPreviewFormation(
+        group: ForcePreviewGroup,
+        gameSystem: ForcePreviewEntry['type'],
+    ): FormationTypeDefinition | null {
+        if (!group.formationId || group.formationId === NO_FORMATION_ID) {
+            return null;
+        }
+
+        return LanceTypeIdentifierUtil.getDefinitionById(group.formationId, gameSystem);
+    }
+
+    private getPreviewFormationDisplayName(
+        formation: FormationTypeDefinition,
+        orgName: string | null,
+    ): string {
+        if (!orgName || formation.name.includes(orgName)) {
+            return formation.name;
+        }
+
+        if (orgName.includes('Level')) {
+            return `${orgName} - ${formation.name}`;
+        }
+
+        return `${formation.name} ${orgName}`;
     }
 
     isLocked(loadForceUnit: ForcePreviewUnit): boolean {
@@ -696,5 +996,24 @@ export class ForcePreviewPanelComponent {
 
         this.selectedUnits.set(nextSelectedUnits);
         this.selectedUnitsChange.emit([...nextSelectedUnits]);
+    }
+
+    hasVisibleNote(note: string | null | undefined): boolean {
+        return hasVisibleNoteText(note);
+    }
+
+    onNoteOverflowChange(isOverflowing: boolean): void {
+        if (this.noteOverflowing() === isOverflowing) {
+            return;
+        }
+
+        this.noteOverflowing.set(isOverflowing);
+        if (!isOverflowing) {
+            this.noteExpanded.set(false);
+        }
+    }
+
+    toggleNoteExpanded(): void {
+        this.noteExpanded.update((expanded) => !expanded);
     }
 }

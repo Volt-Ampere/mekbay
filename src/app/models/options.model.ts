@@ -63,6 +63,7 @@ export interface Options {
     automaticallyConvertFiltersToSemantic: boolean;
     allowMultipleActiveSheets: boolean;
     unitSearchExpandedViewLayout: 'panel-list-filters' | 'filters-list-panel';
+    showFilteredComponents: boolean;
     unitSearchViewMode: 'list' | 'card' | 'chassis' | 'table';
     forceOverviewViewMode: 'expanded' | 'compact' | 'table';
     ASUseAutomations: boolean;
@@ -78,4 +79,13 @@ export interface Options {
     forceGenLastPVMax: number;
     forceGenLastMinUnitCount: number;
     forceGenLastMaxUnitCount: number;
+    forceGenLastGunnerySkillMin: number;
+    forceGenLastGunnerySkillMax: number;
+    forceGenLastPilotingSkillMin: number;
+    forceGenLastPilotingSkillMax: number;
+    forceGenLastMaxPilotSkillDelta: number;
+    forceGenFailureSearchWindowMs: number;
+    forceGenPreventDuplicateChassis: boolean;
+    forceGenUseTaggedQuantities: boolean;
+    forceGenUseUnitTagsAsChassisTags: boolean;
 }

@@ -40,8 +40,9 @@ import {
     type AdvFilterConfig,
     AdvFilterType,
     type FilterState,
+    getBooleanFilterUnitValue,
+    normalizeTriStateBooleanFilterValue,
 } from '../services/unit-search-filters.model';
-import { getForcePackLookupKey } from './force-pack.util';
 import type { WildcardPattern } from './semantic-filter.util';
 import { wildcardToRegex } from './string.util';
 import {
@@ -50,6 +51,7 @@ import {
     getUnitComponentData,
     normalizeMultiStateSelection,
 } from './unit-search-shared.util';
+import { getUnitVariantGroupKey } from './unit-variant.util';
 
 export interface UnitFilterKernelDependencies {
     getProperty: (unit: Unit, key?: string) => unknown;
@@ -270,7 +272,7 @@ export function applyFilterStateToUnits(request: ApplyUnitFilterStateRequest): U
                 for (const key of packSet) lookupKeySet.add(key);
             }
         }
-        results = results.filter(unit => lookupKeySet.has(getForcePackLookupKey(unit)));
+        results = results.filter(unit => lookupKeySet.has(getUnitVariantGroupKey(unit)));
     }
 
     const availabilityScope: AvailabilityFilterScope = {
@@ -298,6 +300,17 @@ export function applyFilterStateToUnits(request: ApplyUnitFilterStateRequest): U
     for (const { conf, filterState } of activeStandardFilters) {
         const val = filterState.value;
         const wildcardPatterns = filterState.wildcardPatterns;
+
+        if (conf.type === AdvFilterType.BOOLEAN) {
+            const booleanFilterValue = normalizeTriStateBooleanFilterValue(val);
+            if (booleanFilterValue !== null) {
+                const expectedValue = booleanFilterValue === 'or';
+                results = results.filter(unit => (
+                    getBooleanFilterUnitValue(conf, dependencies.getProperty(unit, conf.key)) === expectedValue
+                ));
+            }
+            continue;
+        }
 
         if (conf.type === AdvFilterType.DROPDOWN && conf.multistate) {
             results = filterUnitsByMultiState(

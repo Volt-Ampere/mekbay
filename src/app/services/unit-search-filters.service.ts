@@ -46,10 +46,10 @@ import {
     type MegaMekAvailabilityRarity,
 } from '../models/megamek/availability.model';
 import { DataService } from './data.service';
-import type { MultiStateSelection } from '../components/multi-select-dropdown/multi-select-dropdown.component';
+import type { DropdownOption, MultiStateSelection } from '../components/multi-select-dropdown/multi-select-dropdown.component';
 import { getForcePacks } from '../models/forcepacks.model';
 import { BVCalculatorUtil } from '../utils/bv-calculator.util';
-import { parseSearchQuery, type SearchTokensGroup } from '../utils/search.util';
+import { matchesSearch, parseSearchQuery, type SearchTokensGroup } from '../utils/search.util';
 import { OptionsService } from './options.service';
 import { LoggerService } from './logger.service';
 import { GameSystem } from '../models/common.model';
@@ -58,7 +58,7 @@ import { GameService } from './game.service';
 import { UrlStateService } from './url-state.service';
 import { PVCalculatorUtil } from '../utils/pv-calculator.util';
 import { filterStateToSemanticText, tokensToFilterState, type WildcardPattern } from '../utils/semantic-filter.util';
-import { parseSemanticQueryAST, type ParseResult, type ParseError, isComplexQuery } from '../utils/semantic-filter-ast.util';
+import { parseSemanticQueryAST, stripSemanticFieldsFromParseResult, type ParseResult, type ParseError, isComplexQuery } from '../utils/semantic-filter-ast.util';
 import { getSnapshotForcePackNames, type AdvOptionsContextSnapshot } from '../utils/unit-search-adv-options.util';
 import { buildUnitSearchAdvOptions } from '../utils/unit-search-adv-options-builder.util';
 import type { UnitSearchDropdownValuesDependencies } from '../utils/unit-search-dropdown-values.util';
@@ -92,6 +92,12 @@ import {
 import { buildWorkerSearchTelemetrySnapshot, hydrateWorkerResultUnits } from '../utils/unit-search-worker-result.util';
 import { DEFAULT_GUNNERY_SKILL, DEFAULT_PILOTING_SKILL } from '../models/crew-member.model';
 import { getEffectivePilotingSkill } from '../utils/cbt-common.util';
+import { LanceTypeIdentifierUtil } from '../utils/lance-type-identifier.util';
+import { FormationRequirementEngine } from '../utils/formation-requirement-engine.util';
+import type { FormationSearchTarget } from '../utils/formation-requirement.model';
+import type { FormationUnitLike } from '../utils/formation-unit-facts.util';
+import { getFormationDefinitions } from '../utils/formation-blueprints';
+import { getFormationDropdownDisplayName, getFormationNameMatchStrings, type FormationTypeDefinition } from '../utils/formation-type.model';
 import { UserStateService } from './userState.service';
 import { PublicTagsService } from './public-tags.service';
 import { TagsService } from './tags.service';
@@ -111,10 +117,14 @@ import {
     type AdvFilterConfig,
     type AdvOptionsTelemetrySnapshot,
     AdvFilterType,
+    BOOLEAN_FILTERS,
+    type BooleanFilterConfig,
     type FilterState,
+    FORMATION_TARGET_FILTER_KEY,
     DROPDOWN_FILTERS,
     getMegaMekRaritySortAvailabilitySources,
     isMegaMekRaritySortKey,
+    normalizeTriStateBooleanFilterValue,
     RANGE_FILTERS,
     type DropdownFilterConfig,
     type RangeFilterConfig,
@@ -123,11 +133,13 @@ import {
     type SerializedSearchFilter,
 } from './unit-search-filters.model';
 
+const AVAILABILITY_CASCADE_FILTER_KEYS = new Set(['era', 'faction', 'availabilityFrom', 'availabilityRarity']);
 const FORCE_PACK_OPTION_UNIVERSE = getForcePacks().map(pack => ({ name: pack.name }));
 const MEGAMEK_WORKER_CONTEXT_FILTER_KEYS = new Set(['era', 'faction']);
 const MEGAMEK_WORKER_AVAILABILITY_FILTER_KEYS = new Set(['availabilityFrom', 'availabilityRarity']);
 const MEGAMEK_WORKER_AVAILABILITY_SEMANTIC_FIELDS = new Set(['from', 'rarity']);
 const MEGAMEK_WORKER_SEMANTIC_FIELDS = new Set(['era', 'faction', 'from', 'rarity']);
+const FORMATION_TARGET_SEMANTIC_FIELDS = new Set(['formation']);
 
 /** Check if any element in sourceSet exists in targetSet. */
 function setHasAny<T>(sourceSet: ReadonlySet<T>, targetSet: ReadonlySet<T>): boolean {
@@ -154,6 +166,8 @@ interface UnitSearchClosePanelsRequest {
 
 @Injectable({ providedIn: 'root' })
 export class UnitSearchFiltersService {
+    private static readonly FORMATION_SEARCH_ASSIGNED_SKILL = 0;
+
     dataService = inject(DataService);
     optionsService = inject(OptionsService);
     gameService = inject(GameService);
@@ -219,6 +233,16 @@ export class UnitSearchFiltersService {
         ));
     });
 
+    /** Boolean filter configs for current game system */
+    readonly booleanConfigs = computed((): readonly BooleanFilterConfig[] => {
+        const gs = this.gameService.currentGameSystem();
+        const availabilitySource = this.optionsService.options().availabilitySource;
+        return BOOLEAN_FILTERS.filter(f => (
+            (!f.game || f.game === gs)
+            && isFilterAvailableForAvailabilitySource(f, availabilitySource)
+        ));
+    });
+
     pilotGunnerySkill = signal(4);
     pilotPilotingSkill = signal(5);
     /** BV/PV budget limit. 0 means no limit. */
@@ -245,6 +269,20 @@ export class UnitSearchFiltersService {
     readonly advOptionsTelemetry = this.advOptionsTelemetryState.asReadonly();
     private readonly workerSearchEnabled = signal(this.canUseSearchWorker());
     private readonly rawWorkerResultUnitsState = signal<Unit[]>([]);
+    private readonly formationTargetExistingUnitsState = signal<readonly FormationUnitLike[]>([]);
+    readonly formationTarget = computed<FormationSearchTarget | null>(() => {
+        if (this.hasSemanticFormationTarget()) {
+            return null;
+        }
+
+        const formationId = this.getFormationTargetIdFromState(
+            this.filterState()[FORMATION_TARGET_FILTER_KEY],
+            this.gameService.currentGameSystem(),
+        );
+        return formationId
+            ? this.createFormationSearchTarget(formationId, this.gameService.currentGameSystem())
+            : null;
+    });
     private advOptionsTelemetryPublishVersion = 0;
     private lastSearchTelemetryLogKey = '';
     private readonly slowSearchTelemetryThresholdMs = 75;
@@ -266,6 +304,54 @@ export class UnitSearchFiltersService {
             requestId: currentRequest.requestId + 1,
             exitExpandedView: !!options.exitExpandedView,
         });
+    }
+
+    setFormationTarget(target: FormationSearchTarget | null): void {
+        if (target) {
+            this.formationTargetExistingUnitsState.set(target.existingUnits);
+        }
+
+        this.filterState.update(current => {
+            const updated = { ...current };
+            if (target) {
+                updated[FORMATION_TARGET_FILTER_KEY] = {
+                    value: [target.formationId],
+                    interactedWith: true,
+                };
+            } else {
+                delete updated[FORMATION_TARGET_FILTER_KEY];
+            }
+            return updated;
+        });
+        this.refreshWorkerSearchIfNeeded();
+    }
+
+    setFormationTargetExistingUnits(existingUnits: readonly FormationUnitLike[]): void {
+        this.formationTargetExistingUnitsState.set(existingUnits);
+    }
+
+    selectFormationTarget(target: FormationSearchTarget | null): void {
+        const shouldSyncToText = this.autoConvertToSemantic() || this.semanticFilterKeys().has(FORMATION_TARGET_FILTER_KEY);
+        const conf = getAdvancedFilterConfigByKey(FORMATION_TARGET_FILTER_KEY);
+
+        if (shouldSyncToText && conf) {
+            if (target) {
+                this.formationTargetExistingUnitsState.set(target.existingUnits);
+            }
+
+            const semanticValue = target
+                ? this.getFormationTargetSemanticValue(target.formationId, target.gameSystem)
+                : '';
+            this.updateSemanticTextForFilter(
+                FORMATION_TARGET_FILTER_KEY,
+                semanticValue ? [semanticValue] : [],
+                !!semanticValue,
+                conf,
+            );
+            return;
+        }
+
+        this.setFormationTarget(target);
     }
 
     /**
@@ -382,6 +468,10 @@ export class UnitSearchFiltersService {
         return getSemanticFilterKeysFromParsed(this.semanticParsedAST());
     });
 
+    private hasSemanticFormationTarget(): boolean {
+        return this.semanticFilterKeys().has(FORMATION_TARGET_FILTER_KEY);
+    }
+
     private getSemanticStateDependencies(): UnitSearchSemanticStateDependencies {
         return {
             getDropdownOptionUniverse: (filterKey: string) => this.dataService.getDropdownOptionUniverse(filterKey).map(option => option.name),
@@ -454,6 +544,10 @@ export class UnitSearchFiltersService {
     }
 
     private shouldForceMegaMekSyncSearch(): boolean {
+        if (this.hasSemanticFormationTarget()) {
+            return true;
+        }
+
         const availabilitySource = this.optionsService.options().availabilitySource;
 
         if (this.isComplexQuery()) {
@@ -486,7 +580,7 @@ export class UnitSearchFiltersService {
     }
 
     private getWorkerFilterState(state: FilterState): FilterState {
-        const workerState: FilterState = { ...state };
+        const workerState: FilterState = this.stripFormationTargetFilterState(state);
         for (const key of Object.keys(workerState)) {
             if (this.shouldStripFilterFromWorker(key)) {
                 delete workerState[key];
@@ -540,10 +634,21 @@ export class UnitSearchFiltersService {
             return [];
         }
 
-        const allFactionNames = this.dataService.getFactions().map(faction => faction.name);
         return getPositiveDropdownNamesFromFilter(
             normalizeMultiStateSelection(filterStateEntry.value),
-            allFactionNames,
+            this.dataService.getFactions().map(faction => faction.name),
+            filterStateEntry.wildcardPatterns,
+        );
+    }
+
+    private resolveFactionNamesFromFilter(filterStateEntry?: FilterState[string]): ResolvedDropdownNames {
+        if (!filterStateEntry?.interactedWith) {
+            return { or: [], and: [], not: [] };
+        }
+
+        return resolveDropdownNamesFromFilter(
+            normalizeMultiStateSelection(filterStateEntry.value),
+            this.dataService.getFactions().map((faction) => faction.name),
             filterStateEntry.wildcardPatterns,
         );
     }
@@ -562,6 +667,63 @@ export class UnitSearchFiltersService {
 
     private hasResolvedDropdownNames(resolved: ResolvedDropdownNames): boolean {
         return hasResolvedDropdownNames(resolved);
+    }
+
+    private buildFormationCompatibleFactionFilterState(
+        definition: FormationTypeDefinition | null,
+        filterStateEntry?: FilterState[string],
+    ): FilterState[string] | null | undefined {
+        if (!definition?.exclusiveFaction?.length) {
+            return undefined;
+        }
+
+        const allFactionNames = this.dataService.getFactions().map((faction) => faction.name);
+        const resolved = this.resolveFactionNamesFromFilter(filterStateEntry);
+        const excludedFactionNames = new Set(resolved.not);
+        const positiveFactionNames = [...resolved.or, ...resolved.and];
+        const candidateFactionNames = (positiveFactionNames.length > 0 ? positiveFactionNames : allFactionNames)
+            .filter((factionName) => !excludedFactionNames.has(factionName));
+        const compatibleFactionNames = [...new Set(candidateFactionNames)].filter((factionName) => (
+            LanceTypeIdentifierUtil.isFormationAvailableForFaction(
+                definition,
+                this.dataService.getFactionByName(factionName) ?? factionName,
+            )
+        ));
+
+        if (compatibleFactionNames.length === 0) {
+            return null;
+        }
+
+        return {
+            interactedWith: true,
+            value: Object.fromEntries(compatibleFactionNames.map((factionName) => [
+                factionName,
+                {
+                    name: factionName,
+                    state: 'or',
+                    count: 1,
+                },
+            ])),
+        };
+    }
+
+    private buildFormationCompatibleAvailabilityState(
+        definition: FormationTypeDefinition | null,
+        state: FilterState,
+    ): FilterState | null {
+        const factionFilterState = this.buildFormationCompatibleFactionFilterState(definition, state['faction']);
+        if (factionFilterState === undefined) {
+            return state;
+        }
+
+        if (factionFilterState === null) {
+            return null;
+        }
+
+        return {
+            ...state,
+            faction: factionFilterState,
+        };
     }
 
     private getAvailabilitySelectionScopeParts(state: FilterState): AvailabilitySelectionScopeParts {
@@ -624,7 +786,7 @@ export class UnitSearchFiltersService {
             const availabilityFrom = new Set(
                 scope.availabilityFromNames
                     .filter((value): value is MegaMekAvailabilityFrom => (
-                        value === 'Production' || value === 'Salvage'
+                        value === 'Requisition' || value === 'Salvage'
                     )),
             );
             if (availabilityFrom.size > 0) {
@@ -758,7 +920,7 @@ export class UnitSearchFiltersService {
         const selectedAvailabilityRarityNames = (selectionScope?.availabilityRarityNames
             ?? availabilitySelectionScopeParts.availabilityRarityNames) as MegaMekAvailabilityRarity[];
         const selectedPositiveSources = selectedAvailabilityFromNames.filter((value): value is MegaMekAvailabilityFrom => (
-            value === 'Production' || value === 'Salvage'
+            value === 'Requisition' || value === 'Salvage'
         ));
         const selectedPositiveRarities = new Set(
             selectedAvailabilityRarityNames.filter((rarity): rarity is Exclude<MegaMekAvailabilityRarity, typeof MEGAMEK_AVAILABILITY_UNKNOWN | typeof MEGAMEK_AVAILABILITY_NOT_AVAILABLE> => (
@@ -782,7 +944,7 @@ export class UnitSearchFiltersService {
                     ? { availabilityRarityNames: [...selectedPositiveRarities] }
                     : {}),
             });
-            if (score < 1) {
+            if (score <= 0) {
                 continue;
             }
 
@@ -820,7 +982,7 @@ export class UnitSearchFiltersService {
         const selectedAvailabilityFromNames = scope?.availabilityFromNames
             ?? this.getAvailabilitySelectionScopeParts(this.getApplicableFilterState(this.effectiveFilterState())).availabilityFromNames;
         const selectedSources = selectedAvailabilityFromNames.filter((value): value is MegaMekAvailabilityFrom => (
-            value === 'Production' || value === 'Salvage'
+            value === 'Requisition' || value === 'Salvage'
         ));
 
         return selectedSources.length > 0
@@ -846,10 +1008,61 @@ export class UnitSearchFiltersService {
         return this.unitAvailabilitySource.unitMatchesAvailabilityRarity(unit, rarityName, context);
     }
 
+    public getDropdownOptionsForFormationTarget(
+        filterKey: 'era' | 'faction',
+        definition: FormationTypeDefinition | null,
+    ): DropdownOption[] | null {
+        const conf = getAdvancedFilterConfigByKey(filterKey);
+        if (!conf || conf.type !== AdvFilterType.DROPDOWN || !isFilterAvailableForAvailabilitySource(conf, this.optionsService.options().availabilitySource)) {
+            return null;
+        }
+
+        const state = this.stripFormationTargetFilterState(this.getApplicableFilterState(this.effectiveFilterState()));
+    this.tagsVersion();
+        const contextUnits = this.getAvailabilityCascadeContextUnits(state);
+
+        return this.buildMegaMekAvailabilityDropdownOptions(conf, contextUnits, state, definition);
+    }
+
+    private getAvailabilityCascadeContextUnits(state: FilterState): Unit[] {
+        let baseUnits = this.units;
+        const textSearch = this.effectiveTextSearch();
+        if (textSearch) {
+            const textTokens = parseSearchQuery(textSearch);
+            baseUnits = baseUnits.filter(unit => {
+                const searchableText = unit._searchKey || `${unit.chassis ?? ''} ${unit.model ?? ''}`.toLowerCase();
+                return matchesSearch(searchableText, textTokens, true);
+            });
+        }
+
+        const nonAvailabilityState = Object.fromEntries(
+            Object.entries(state).filter(([key, value]) => (
+                value.interactedWith && !AVAILABILITY_CASCADE_FILTER_KEYS.has(key)
+            )),
+        ) as FilterState;
+
+        return Object.keys(nonAvailabilityState).length === 0
+            ? baseUnits
+            : applyFilterStateToUnits({
+                units: baseUnits,
+                state: nonAvailabilityState,
+                dependencies: this.getUnitFilterKernelDependencies(),
+            });
+    }
+
+    private getFormationTargetDefinitionOverride(
+        activeFormationOverride: FormationTypeDefinition | null | undefined,
+    ): FormationTypeDefinition | null {
+        return activeFormationOverride === undefined
+            ? this.getActiveFormationTargetDefinition(this.gameService.currentGameSystem())
+            : activeFormationOverride;
+    }
+
     private buildMegaMekAvailabilityDropdownOptions(
         conf: AdvFilterConfig,
         contextUnits: Unit[],
         state: FilterState,
+        activeFormationOverride?: FormationTypeDefinition | null,
     ): { name: string; img?: string; displayName?: string; available: boolean }[] | null {
         const useMegaMekAvailability = this.unitAvailabilitySource.useMegaMekAvailability();
         const { availabilityFromNames, availabilityRarityNames } = this.getAvailabilitySelectionScopeParts(state);
@@ -859,14 +1072,14 @@ export class UnitSearchFiltersService {
 
         if (conf.key === 'era') {
             return useScopedAvailabilityDropdowns
-                ? this.buildMegaMekEraDropdownOptions(conf, contextUnits, state)
-                : this.buildExternalDropdownOptions(conf, contextUnits, state);
+                ? this.buildMegaMekEraDropdownOptions(conf, contextUnits, state, activeFormationOverride)
+                : this.buildExternalDropdownOptions(conf, contextUnits, state, activeFormationOverride);
         }
 
         if (conf.key === 'faction') {
             return useScopedAvailabilityDropdowns
-                ? this.buildMegaMekFactionDropdownOptions(conf, contextUnits, state)
-                : this.buildExternalDropdownOptions(conf, contextUnits, state);
+                ? this.buildMegaMekFactionDropdownOptions(conf, contextUnits, state, activeFormationOverride)
+                : this.buildExternalDropdownOptions(conf, contextUnits, state, activeFormationOverride);
         }
 
         if (conf.key === 'availabilityRarity' || conf.key === 'availabilityFrom') {
@@ -918,6 +1131,7 @@ export class UnitSearchFiltersService {
         conf: AdvFilterConfig,
         contextUnits: Unit[],
         state: FilterState,
+        activeFormationOverride?: FormationTypeDefinition | null,
     ): { name: string; img?: string; displayName?: string; available: boolean }[] | null {
         if (conf.key !== 'era' && conf.key !== 'faction') {
             return null;
@@ -927,17 +1141,30 @@ export class UnitSearchFiltersService {
             contextUnits.map((unit) => this.unitAvailabilitySource.getUnitAvailabilityKey(unit)),
         );
         const currentFilterState = state[conf.key];
+        const activeFormation = conf.key === 'faction'
+            ? this.getFormationTargetDefinitionOverride(activeFormationOverride)
+            : null;
+        const formationConstrainedState = conf.key === 'era'
+            ? this.buildFormationCompatibleAvailabilityState(
+                this.getFormationTargetDefinitionOverride(activeFormationOverride),
+                state,
+            )
+            : state;
 
         const options = this.dataService.getDropdownOptionUniverse(conf.key).map((option) => {
             const candidateFilterState = this.buildExternalDropdownCandidateState(currentFilterState, option.name);
-            const candidateUnitIds = conf.key === 'era'
-                ? this.getUnitIdsForExternalFilters(candidateFilterState, state['faction'])
-                : this.getUnitIdsForExternalFilters(state['era'], candidateFilterState);
+            const candidateUnitIds = formationConstrainedState === null
+                ? new Set<string>()
+                : conf.key === 'era'
+                    ? this.getUnitIdsForExternalFilters(candidateFilterState, formationConstrainedState['faction'])
+                    : this.getUnitIdsForExternalFilters(state['era'], candidateFilterState);
 
             return {
                 name: option.name,
                 ...(option.img ? { img: option.img } : {}),
-                available: candidateUnitIds !== null && setHasAny(contextUnitIds, candidateUnitIds),
+                available: candidateUnitIds !== null
+                    && setHasAny(contextUnitIds, candidateUnitIds)
+                    && this.isFormationAvailableForAnyFaction(activeFormation, [option.name]),
             };
         });
 
@@ -1001,11 +1228,27 @@ export class UnitSearchFiltersService {
         conf: AdvFilterConfig,
         contextUnits: Unit[],
         state: FilterState,
+        activeFormationOverride?: FormationTypeDefinition | null,
     ): { name: string; img?: string; displayName?: string; available: boolean }[] {
-        const { factionNames } = this.getAvailabilitySelectionScopeParts(state);
+        const formationConstrainedState = this.buildFormationCompatibleAvailabilityState(
+            this.getFormationTargetDefinitionOverride(activeFormationOverride),
+            state,
+        );
+        if (formationConstrainedState === null) {
+            const options = this.dataService.getDropdownOptionUniverse(conf.key).map((option) => ({
+                name: option.name,
+                ...(option.img ? { img: option.img } : {}),
+                available: false,
+            }));
+
+            return sortDropdownOptionObjects(options, conf.sortOptions);
+        }
+
+        const availabilityState = formationConstrainedState;
+        const { factionNames } = this.getAvailabilitySelectionScopeParts(availabilityState);
         const extinctFactionName = this.dataService.getFactionById(MULFACTION_EXTINCT)?.name;
         if (!extinctFactionName || !factionNames.includes(extinctFactionName)) {
-            const optimizedAvailableEraIds = this.collectFastMegaMekAvailableOptionIds(contextUnits, state, 'era');
+            const optimizedAvailableEraIds = this.collectFastMegaMekAvailableOptionIds(contextUnits, availabilityState, 'era');
             if (optimizedAvailableEraIds) {
                 const options = this.dataService.getDropdownOptionUniverse(conf.key).map((option) => ({
                     name: option.name,
@@ -1016,7 +1259,7 @@ export class UnitSearchFiltersService {
                 return sortDropdownOptionObjects(options, conf.sortOptions);
             }
         }
-        const { availabilityFromNames } = this.getAvailabilitySelectionScopeParts(state);
+        const { availabilityFromNames } = this.getAvailabilitySelectionScopeParts(availabilityState);
         const contextUnitIds = new Set(contextUnits.map((unit) => unit.name));
 
         const options = this.dataService.getDropdownOptionUniverse(conf.key).map((option) => {
@@ -1029,7 +1272,7 @@ export class UnitSearchFiltersService {
             return {
                 name: option.name,
                 ...(option.img ? { img: option.img } : {}),
-                available: setHasAny(contextUnitIds, this.getMegaMekOptionScopeUnitIds(candidateScope, state)),
+                available: setHasAny(contextUnitIds, this.getMegaMekOptionScopeUnitIds(candidateScope, availabilityState)),
             };
         });
 
@@ -1040,7 +1283,23 @@ export class UnitSearchFiltersService {
         conf: AdvFilterConfig,
         contextUnits: Unit[],
         state: FilterState,
+        activeFormationOverride?: FormationTypeDefinition | null,
     ): { name: string; img?: string; displayName?: string; available: boolean }[] {
+        const activeFormation = this.getFormationTargetDefinitionOverride(activeFormationOverride);
+        const useSelfFilteredFactionCandidates = this.unitAvailabilitySource.useMegaMekAvailability()
+            && this.hasAndDropdownSelections(state['faction']);
+
+        if (useSelfFilteredFactionCandidates) {
+            const options = this.dataService.getDropdownOptionUniverse(conf.key).map((option) => ({
+                name: option.name,
+                ...(option.img ? { img: option.img } : {}),
+                available: this.isFormationAvailableForAnyFaction(activeFormation, [option.name])
+                    && this.isMegaMekFactionOptionAvailableWithSelfFilter(option.name, contextUnits, state),
+            }));
+
+            return sortDropdownOptionObjects(options, conf.sortOptions);
+        }
+
         const optimizedAvailableFactionIds = this.collectFastMegaMekAvailableOptionIds(contextUnits, state, 'faction');
         if (optimizedAvailableFactionIds) {
             const { eraNames, availabilityFromNames } = this.getAvailabilitySelectionScopeParts(state);
@@ -1049,13 +1308,15 @@ export class UnitSearchFiltersService {
             const options = this.dataService.getDropdownOptionUniverse(conf.key).map((option) => ({
                 name: option.name,
                 ...(option.img ? { img: option.img } : {}),
-                available: extinctFactionName && option.name === extinctFactionName
-                    ? setHasAny(contextUnitIds, this.getMegaMekOptionScopeUnitIds({
-                        ...(eraNames.length > 0 ? { eraNames } : {}),
-                        factionNames: [option.name],
-                        ...(availabilityFromNames.length > 0 ? { availabilityFromNames } : {}),
-                    }, state))
-                    : optimizedAvailableFactionIds.has(this.dataService.getFactionByName(option.name)?.id ?? -1),
+                available: this.isFormationAvailableForAnyFaction(activeFormation, [option.name]) && (
+                    extinctFactionName && option.name === extinctFactionName
+                        ? setHasAny(contextUnitIds, this.getMegaMekOptionScopeUnitIds({
+                            ...(eraNames.length > 0 ? { eraNames } : {}),
+                            factionNames: [option.name],
+                            ...(availabilityFromNames.length > 0 ? { availabilityFromNames } : {}),
+                        }, state))
+                        : optimizedAvailableFactionIds.has(this.dataService.getFactionByName(option.name)?.id ?? -1)
+                ),
             }));
 
             return sortDropdownOptionObjects(options, conf.sortOptions);
@@ -1074,11 +1335,55 @@ export class UnitSearchFiltersService {
             return {
                 name: option.name,
                 ...(option.img ? { img: option.img } : {}),
-                available: setHasAny(contextUnitIds, this.getMegaMekOptionScopeUnitIds(candidateScope, state)),
+                available: this.isFormationAvailableForAnyFaction(activeFormation, [option.name])
+                    && setHasAny(contextUnitIds, this.getMegaMekOptionScopeUnitIds(candidateScope, state)),
             };
         });
 
         return sortDropdownOptionObjects(options, conf.sortOptions);
+    }
+
+    private hasAndDropdownSelections(filterStateEntry?: FilterState[string]): boolean {
+        if (!filterStateEntry?.interactedWith) {
+            return false;
+        }
+
+        return Object.values(normalizeMultiStateSelection(filterStateEntry.value))
+            .some((selection) => selection.state === 'and');
+    }
+
+    private isMegaMekFactionOptionAvailableWithSelfFilter(
+        optionName: string,
+        contextUnits: Unit[],
+        state: FilterState,
+    ): boolean {
+        const { eraNames, availabilityFromNames } = this.getAvailabilitySelectionScopeParts(state);
+        const contextUnitIds = new Set(contextUnits.map((unit) => unit.name));
+        const candidateFilterState = this.buildExternalDropdownCandidateState(state['faction'], optionName);
+        const candidateMembershipUnitIds = this.getUnitIdsForExternalFilters(state['era'], candidateFilterState);
+        if (!candidateMembershipUnitIds || candidateMembershipUnitIds.size === 0) {
+            return false;
+        }
+
+        const candidateFactionNames = this.getPositiveFactionNames(candidateFilterState);
+        if (candidateFactionNames.length === 0) {
+            return false;
+        }
+
+        const candidateScope: AvailabilityFilterScope = {
+            ...(eraNames.length > 0 ? { eraNames } : {}),
+            factionNames: candidateFactionNames,
+            ...(availabilityFromNames.length > 0 ? { availabilityFromNames } : {}),
+        };
+        const availabilityUnitIds = this.getMegaMekOptionScopeUnitIds(candidateScope, state);
+
+        for (const unitId of candidateMembershipUnitIds) {
+            if (contextUnitIds.has(unitId) && availabilityUnitIds.has(unitId)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private getMegaMekOptionScopeUnitIds(
@@ -1109,7 +1414,7 @@ export class UnitSearchFiltersService {
         }
 
         const selectedPositiveSources = availabilityFromNames.filter((value): value is MegaMekAvailabilityFrom => (
-            value === 'Production' || value === 'Salvage'
+            value === 'Requisition' || value === 'Salvage'
         ));
         const includesUnknownSource = availabilityFromNames.includes(MEGAMEK_AVAILABILITY_UNKNOWN);
         const hasSourceFilter = availabilityFromNames.length > 0;
@@ -1192,7 +1497,7 @@ export class UnitSearchFiltersService {
         }
 
         const selectedSources = availabilityFromNames.filter((value): value is MegaMekAvailabilityFrom => (
-            value === 'Production' || value === 'Salvage'
+            value === 'Requisition' || value === 'Salvage'
         ));
         const useMegaMekAvailability = this.unitAvailabilitySource.useMegaMekAvailability();
         const selectedEraIds = target === 'faction'
@@ -1277,7 +1582,7 @@ export class UnitSearchFiltersService {
                         let maxScores = maxScoresByOptionId?.get(candidateId);
                         if (!maxScores) {
                             maxScores = {
-                                Production: 0,
+                                Requisition: 0,
                                 Salvage: 0,
                             };
                             maxScoresByOptionId?.set(candidateId, maxScores);
@@ -1429,20 +1734,28 @@ export class UnitSearchFiltersService {
     }
 
     public setSearchText(rawText: string): string {
+        const gameSystem = this.gameService.currentGameSystem();
+        const semanticKeys = getSemanticFilterKeysFromParsed(parseSemanticQueryAST(rawText, gameSystem));
+        const formationTargetInSearchText = semanticKeys.has(FORMATION_TARGET_FILTER_KEY);
         const next = buildPromotedSearchText({
             rawText,
-            gameSystem: this.gameService.currentGameSystem(),
-            manualState: this.filterState(),
+            gameSystem,
+            manualState: formationTargetInSearchText
+                ? this.stripFormationTargetFilterState(this.filterState())
+                : this.filterState(),
             totalRanges: this.totalRangesCache,
             ...this.getSemanticStateDependencies(),
         });
 
         this.searchText.set(next.text);
-        if (next.promotedKeys.length > 0) {
+        if (next.promotedKeys.length > 0 || formationTargetInSearchText) {
             this.filterState.update(current => {
                 const updated = { ...current };
                 for (const key of next.promotedKeys) {
                     delete updated[key];
+                }
+                if (formationTargetInSearchText) {
+                    delete updated[FORMATION_TARGET_FILTER_KEY];
                 }
                 return updated;
             });
@@ -1471,6 +1784,49 @@ export class UnitSearchFiltersService {
             this.getSemanticStateDependencies(),
         );
     });
+
+    readonly semanticFormationTargetId = computed((): string | null => {
+        return this.getFormationTargetIdFromState(
+            this.semanticFilterState()[FORMATION_TARGET_FILTER_KEY],
+            this.gameService.currentGameSystem(),
+        );
+    });
+
+    getActiveFormationTargetDefinition(gameSystem: GameSystem): FormationTypeDefinition | null {
+        const formationId = this.getFormationTargetIdFromState(
+            this.effectiveFilterState()[FORMATION_TARGET_FILTER_KEY],
+            gameSystem,
+        );
+
+        return formationId
+            ? LanceTypeIdentifierUtil.getDefinitionById(formationId, gameSystem)
+            : null;
+    }
+
+    getFormationTargetOptions(gameSystem: GameSystem): DropdownOption[] {
+        const activeFactionNames = this.getPositiveFactionNames(this.effectiveFilterState()['faction']);
+        const definitions = this.getFormationTargetDefinitions(gameSystem);
+        return [
+            { name: '', displayName: 'Any' },
+            ...definitions.map((definition) => ({
+                name: definition.id,
+                displayName: getFormationDropdownDisplayName(definition),
+                available: this.isFormationAvailableForAnyFaction(definition, activeFactionNames),
+            })),
+        ];
+    }
+
+    private isFormationAvailableForAnyFaction(
+        definition: FormationTypeDefinition | null,
+        factionNames: readonly string[],
+    ): boolean {
+        return !definition?.exclusiveFaction?.length
+            || factionNames.length === 0
+            || factionNames.some((factionName) => LanceTypeIdentifierUtil.isFormationAvailableForFaction(
+                definition,
+                this.dataService.getFactionByName(factionName) ?? factionName,
+            ));
+    }
 
     /**
      * Effective filter state - combines manual filterState with semantic filters.
@@ -1584,15 +1940,23 @@ export class UnitSearchFiltersService {
         return result;
     }
 
+    private stripFormationTargetFilterState(state: FilterState): FilterState {
+        const stripped = { ...state };
+        delete stripped[FORMATION_TARGET_FILTER_KEY];
+        return stripped;
+    }
+
     private buildWorkerSearchRequest(corpusVersion: string): UnitSearchWorkerQueryRequest {
         const gameSystem = this.gameService.currentGameSystem();
         const workerFilterState = this.getWorkerFilterState(this.getApplicableFilterState(this.effectiveFilterState()));
-        const executionQuery = buildWorkerExecutionQuery({
-            effectiveFilterState: workerFilterState,
-            effectiveTextSearch: this.effectiveTextSearch(),
-            gameSystem,
-            totalRangesCache: this.totalRangesCache,
-        });
+        const executionQuery = this.isComplexQuery()
+            ? this.searchText().trim()
+            : buildWorkerExecutionQuery({
+                effectiveFilterState: workerFilterState,
+                effectiveTextSearch: this.effectiveTextSearch(),
+                gameSystem,
+                totalRangesCache: this.totalRangesCache,
+            });
 
         this.searchRequestRevision += 1;
 
@@ -1652,7 +2016,8 @@ export class UnitSearchFiltersService {
         const telemetryStages = [...result.stages];
         const stageCountBeforePostProcessing = telemetryStages.length;
         const postFilteredResults = this.applyWorkerPostFilters(hydratedResults, telemetryStages);
-        const sortedResults = this.sortHydratedWorkerResults(postFilteredResults, telemetryStages);
+        const formationFilteredResults = this.applyFormationTargetFilter(postFilteredResults, telemetryStages);
+        const sortedResults = this.sortHydratedWorkerResults(formationFilteredResults, telemetryStages);
         const cappedResults = this.applyRemainingBudgetLimit(sortedResults, telemetryStages);
         const addedTelemetryMs = telemetryStages
             .slice(stageCountBeforePostProcessing)
@@ -1694,6 +2059,165 @@ export class UnitSearchFiltersService {
             applyPostFilters,
             (value) => value.length,
         );
+    }
+
+    private applyFormationTargetFilter(units: Unit[], telemetryStages?: SearchTelemetryStage[]): Unit[] {
+        if (this.hasSemanticFormationTarget()) {
+            return units;
+        }
+
+        const target = this.formationTarget();
+        if (!target || units.length === 0) {
+            return units;
+        }
+
+        const definition = LanceTypeIdentifierUtil.getDefinitionById(target.formationId, target.gameSystem);
+        if (!definition || !FormationRequirementEngine.hasBlueprint(definition.id)) {
+            return units;
+        }
+
+        const existingUnits = this.createFormationSearchUnits(target.existingUnits);
+        const applyTargetFilter = () => units.filter(unit => {
+            const candidate = this.createFormationCandidateUnit(unit, target);
+            return FormationRequirementEngine.evaluateSearchCandidate(
+                definition,
+                existingUnits,
+                candidate,
+                target.gameSystem,
+                { maxUnits: target.maxUnits ?? definition.maxUnits },
+            ).allowed;
+        });
+
+        if (!telemetryStages) {
+            return applyTargetFilter();
+        }
+
+        return measureStage(
+            telemetryStages,
+            'formation-target-filter',
+            units.length,
+            applyTargetFilter,
+            (value) => value.length,
+        );
+    }
+
+    private createFormationCandidateUnit(unit: Unit, target: FormationSearchTarget): FormationUnitLike {
+        const baseForce = target.existingUnits[0]?.force ?? {
+            faction: () => null,
+            era: () => null,
+            techBase: () => '',
+            gameSystem: target.gameSystem,
+        };
+
+        return this.createFormationSearchUnit({
+            force: baseForce,
+            getUnit: () => unit,
+        });
+    }
+
+    private createFormationSearchUnits(units: readonly FormationUnitLike[]): readonly FormationUnitLike[] {
+        return units.map(unit => this.createFormationSearchUnit(unit));
+    }
+
+    private createFormationSearchUnit(unit: FormationUnitLike): FormationUnitLike {
+        return {
+            force: unit.force,
+            getUnit: () => unit.getUnit(),
+            pilotSkill: () => UnitSearchFiltersService.FORMATION_SEARCH_ASSIGNED_SKILL,
+            gunnerySkill: () => UnitSearchFiltersService.FORMATION_SEARCH_ASSIGNED_SKILL,
+        };
+    }
+
+    private getFormationTargetExistingUnits(): readonly FormationUnitLike[] {
+        return this.formationTargetExistingUnitsState();
+    }
+
+    private getFormationTargetDefinitions(gameSystem: GameSystem): FormationTypeDefinition[] {
+        const definitions: FormationTypeDefinition[] = [];
+        const seen = new Set<string>();
+
+        for (const definition of getFormationDefinitions()) {
+            if (!FormationRequirementEngine.hasBlueprint(definition.id)) {
+                continue;
+            }
+
+            const resolved = LanceTypeIdentifierUtil.getDefinitionById(definition.id, gameSystem);
+            if (!resolved || seen.has(resolved.id)) {
+                continue;
+            }
+
+            definitions.push(resolved);
+            seen.add(resolved.id);
+        }
+
+        return definitions.sort((left, right) => (
+            left.name.localeCompare(right.name) || left.id.localeCompare(right.id)
+        ));
+    }
+
+    private getFormationTargetSemanticNames(gameSystem: GameSystem): string[] {
+        const names = new Set<string>();
+        for (const definition of this.getFormationTargetDefinitions(gameSystem)) {
+            for (const name of getFormationNameMatchStrings(definition)) {
+                names.add(name);
+            }
+        }
+        return Array.from(names);
+    }
+
+    private resolveFormationTargetDefinition(value: string, gameSystem: GameSystem): FormationTypeDefinition | null {
+        return LanceTypeIdentifierUtil.resolveDefinition(value, gameSystem);
+    }
+
+    private getFormationTargetIdFromState(state: FilterState[string] | undefined, gameSystem: GameSystem): string | null {
+        if (!state?.interactedWith || !Array.isArray(state.value) || state.value.length !== 1 || state.wildcardPatterns?.length) {
+            return null;
+        }
+
+        return this.resolveFormationTargetDefinition(String(state.value[0]), gameSystem)?.id ?? null;
+    }
+
+    private createFormationSearchTarget(formationId: string, gameSystem: GameSystem): FormationSearchTarget | null {
+        const definition = LanceTypeIdentifierUtil.getDefinitionById(formationId, gameSystem);
+        if (!definition) {
+            return null;
+        }
+
+        return {
+            formationId: definition.id,
+            existingUnits: this.formationTargetExistingUnitsState(),
+            gameSystem,
+            minUnits: definition.minUnits,
+            maxUnits: definition.maxUnits,
+        };
+    }
+
+    private getFormationTargetSemanticValue(formationId: string, gameSystem: GameSystem): string {
+        return LanceTypeIdentifierUtil.getDefinitionById(formationId, gameSystem)?.name ?? formationId;
+    }
+
+    private unitMatchesFormationTarget(unit: Unit, formationName: string, gameSystem: GameSystem): boolean {
+        const definition = this.resolveFormationTargetDefinition(formationName, gameSystem);
+        if (!definition || !FormationRequirementEngine.hasBlueprint(definition.id)) {
+            return false;
+        }
+
+        const target: FormationSearchTarget = {
+            formationId: definition.id,
+            existingUnits: this.getFormationTargetExistingUnits(),
+            gameSystem,
+            minUnits: definition.minUnits,
+            maxUnits: definition.maxUnits,
+        };
+        const existingUnits = this.createFormationSearchUnits(target.existingUnits);
+        const candidate = this.createFormationCandidateUnit(unit, target);
+        return FormationRequirementEngine.evaluateSearchCandidate(
+            definition,
+            existingUnits,
+            candidate,
+            gameSystem,
+            { maxUnits: target.maxUnits ?? definition.maxUnits },
+        ).allowed;
     }
 
     private getPendingWorkerFallbackUnits(): Unit[] | null {
@@ -2475,8 +2999,7 @@ export class UnitSearchFiltersService {
             return this.unitAvailabilitySource.unitBelongsToEra(unit, era);
         }
 
-        return this.unitAvailabilitySource.getMegaMekMembershipUnitIds(context)
-            .has(this.unitAvailabilitySource.getUnitAvailabilityKey(unit));
+        return this.unitAvailabilitySource.unitMatchesMegaMekMembership(unit, context);
     }
 
     /**
@@ -2855,7 +3378,7 @@ export class UnitSearchFiltersService {
         };
     }
 
-    private executeSyncSearch(): {
+    private executeSyncSearch(options: { ignoreFormationTarget?: boolean } = {}): {
         execution: ReturnType<typeof executeUnitSearch>;
         parseTelemetry: SearchTelemetryStage[];
     } {
@@ -2878,6 +3401,9 @@ export class UnitSearchFiltersService {
             this.units.length,
             () => this.semanticParsedAST(),
         );
+        const executionParsedQuery = options.ignoreFormationTarget
+            ? stripSemanticFieldsFromParseResult(parsedQuery, FORMATION_TARGET_SEMANTIC_FIELDS)
+            : parsedQuery;
         const megaMekRaritySortScope = this.megaMekRaritySortScope();
         const megaMekRaritySortContext = this.megaMekRaritySortContext();
         const megaMekRaritySortScoreResolver = megaMekRaritySortContext === null
@@ -2886,9 +3412,9 @@ export class UnitSearchFiltersService {
 
         const execution = executeUnitSearch({
             units: this.units,
-            parsedQuery,
+            parsedQuery: executionParsedQuery,
             searchTokens: this.searchTokens(),
-            uiOnlyFilterState: this.getUiOnlyFilterState(this.getApplicableFilterState(this.filterState()), this.semanticFilterKeys()),
+            uiOnlyFilterState: this.stripFormationTargetFilterState(this.getUiOnlyFilterState(this.getApplicableFilterState(this.filterState()), this.semanticFilterKeys())),
             uiOnlyFilterDependencies: this.getUnitFilterKernelDependencies(),
             gameSystem: this.gameService.currentGameSystem(),
             sortKey: this.selectedSort(),
@@ -2902,10 +3428,12 @@ export class UnitSearchFiltersService {
             unitMatchesAvailabilityFrom: (unit: Unit, availabilityFromName: string, scope?: AvailabilityFilterScope) => this.unitMatchesAvailabilityFrom(unit, availabilityFromName, scope),
             unitMatchesAvailabilityRarity: (unit: Unit, rarityName: string, scope?: AvailabilityFilterScope) => this.unitMatchesAvailabilityRarity(unit, rarityName, scope),
             unitBelongsToForcePack: (unit: Unit, packName: string) => this.unitBelongsToForcePack(unit, packName),
+            unitMatchesFormationTarget: (unit: Unit, formationName: string) => this.unitMatchesFormationTarget(unit, formationName, this.gameService.currentGameSystem()),
             getAllEraNames: () => this.dataService.getEras().map(era => era.name),
             getAllFactionNames: () => this.dataService.getFactions().map(faction => faction.name),
             getAllAvailabilityFromNames: () => [...MEGAMEK_AVAILABILITY_FROM_FILTER_OPTIONS],
             getAllAvailabilityRarityNames: () => [...MEGAMEK_AVAILABILITY_ALL_RARITY_OPTIONS],
+            getAllFormationNames: () => this.getFormationTargetSemanticNames(this.gameService.currentGameSystem()),
             getDisplayName: (filterKey: string, value: string) => {
                 const conf = getAdvancedFilterConfigByKey(filterKey);
                 const fn = conf?.displayNameFn ?? this.displayNameFns[filterKey];
@@ -2926,11 +3454,14 @@ export class UnitSearchFiltersService {
     }
 
     private readonly uncappedSyncSearch = computed(() => this.executeSyncSearch());
+    private readonly uncappedSyncSearchIgnoringFormationTarget = computed(() => this.executeSyncSearch({ ignoreFormationTarget: true }));
 
     syncFilteredUnits = computed(() => {
         const { execution, parseTelemetry } = this.uncappedSyncSearch();
         const budgetTelemetry: SearchTelemetryStage[] = [];
-        const cappedResults = this.applyRemainingBudgetLimit(execution.results, budgetTelemetry);
+        const formationTelemetry: SearchTelemetryStage[] = [];
+        const formationFilteredResults = this.applyFormationTargetFilter(execution.results, formationTelemetry);
+        const cappedResults = this.applyRemainingBudgetLimit(formationFilteredResults, budgetTelemetry);
 
         this.updateSearchTelemetry({
             timestamp: Date.now(),
@@ -2941,7 +3472,7 @@ export class UnitSearchFiltersService {
             sortKey: this.selectedSort(),
             sortDirection: this.selectedSortDirection(),
             isComplex: execution.isComplex,
-            stages: [...parseTelemetry, ...execution.telemetryStages, ...budgetTelemetry],
+            stages: [...parseTelemetry, ...execution.telemetryStages, ...formationTelemetry, ...budgetTelemetry],
             totalMs: execution.totalMs,
         });
 
@@ -2956,16 +3487,25 @@ export class UnitSearchFiltersService {
                 return pendingFallback;
             }
 
-            return this.uncappedWorkerFilteredUnits();
+            return this.uncappedWorkerEligibleUnits();
         }
 
-        return this.uncappedSyncSearch().execution.results;
+        return this.hasSemanticFormationTarget()
+            ? this.uncappedSyncSearchIgnoringFormationTarget().execution.results
+            : this.uncappedSyncSearch().execution.results;
+    });
+
+    private readonly uncappedWorkerEligibleUnits = computed(() => {
+        const hydratedResults = this.rawWorkerResultUnitsState();
+        const postFilteredResults = this.applyWorkerPostFilters(hydratedResults);
+        return this.sortHydratedWorkerResults(postFilteredResults);
     });
 
     private readonly uncappedWorkerFilteredUnits = computed(() => {
         const hydratedResults = this.rawWorkerResultUnitsState();
         const postFilteredResults = this.applyWorkerPostFilters(hydratedResults);
-        return this.sortHydratedWorkerResults(postFilteredResults);
+        const formationFilteredResults = this.applyFormationTargetFilter(postFilteredResults);
+        return this.sortHydratedWorkerResults(formationFilteredResults);
     });
 
     filteredUnits = computed(() => {
@@ -2975,7 +3515,7 @@ export class UnitSearchFiltersService {
 
         const pendingFallback = this.getPendingWorkerFallbackUnits();
         if (pendingFallback) {
-            return this.applyRemainingBudgetLimit(pendingFallback);
+            return this.applyRemainingBudgetLimit(this.applyFormationTargetFilter(pendingFallback));
         }
 
         return this.applyRemainingBudgetLimit(this.uncappedWorkerFilteredUnits());
@@ -2984,7 +3524,7 @@ export class UnitSearchFiltersService {
     // Advanced filter options
     advOptions = computed(() => {
         if (!this.isDataReady()) return {};
-        const state = this.getApplicableFilterState(this.effectiveFilterState());
+        const state = this.stripFormationTargetFilterState(this.getApplicableFilterState(this.effectiveFilterState()));
         this.tagsVersion();
 
         const advOptionsResult = buildUnitSearchAdvOptions({
@@ -3165,6 +3705,8 @@ export class UnitSearchFiltersService {
 
         if (conf.type === AdvFilterType.DROPDOWN && conf.multistate) {
             value = normalizeMultiStateSelection(value);
+        } else if (conf.type === AdvFilterType.BOOLEAN) {
+            value = normalizeTriStateBooleanFilterValue(value);
         }
 
         let interacted = true;
@@ -3173,7 +3715,8 @@ export class UnitSearchFiltersService {
 
         if (conf.type === AdvFilterType.RANGE) {
             // For range filters, check which boundaries the value matches.
-            const availableRange = this.advOptions()[key]?.options;
+            const option = this.advOptions()[key];
+            const availableRange = option?.type === 'range' ? option.options : undefined;
             if (availableRange) {
                 atLeftBoundary = value[0] === availableRange[0];
                 atRightBoundary = value[1] === availableRange[1];
@@ -3195,6 +3738,8 @@ export class UnitSearchFiltersService {
                     interacted = false;
                 }
             }
+        } else if (conf.type === AdvFilterType.BOOLEAN && value === null) {
+            interacted = false;
         }
 
         // Determine if we should sync this filter to semantic text:
@@ -3228,10 +3773,13 @@ export class UnitSearchFiltersService {
         if (shouldSyncToText) {
             // Remove the semantic token for this filter by passing non-interacted.
             // Use the available range as the value so boundary checks produce no token text.
-            const availableRange = this.advOptions()[key]?.options as [number, number] | undefined;
+            const option = this.advOptions()[key];
+            const availableRange = option?.type === 'range' ? option.options : undefined;
             const resetValue = conf.type === AdvFilterType.RANGE
                 ? (availableRange || this.totalRangesCache[key] || [0, 0])
-                : [];
+                : conf.type === AdvFilterType.BOOLEAN
+                    ? null
+                    : [];
             this.updateSemanticTextForFilter(key, resetValue, false, conf);
         } else {
             // Remove from filterState

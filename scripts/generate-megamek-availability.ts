@@ -15,6 +15,10 @@ const {
     resolveMmDataRoot,
 } = require('./lib/script-paths.js') as typeof import('./lib/script-paths.js');
 
+const {
+    writeFileWithContentTimestamp,
+} = require('./lib/deterministic-output.js') as typeof import('./lib/deterministic-output');
+
 type JsonObject = Record<string, unknown>;
 type CompactAvailabilityByRating = [number, number, number, number, number];
 type CompactAvailabilityValue = number | `${number}+` | `${number}-` | CompactAvailabilityByRating;
@@ -212,6 +216,10 @@ const JSON_INDENT = 2;
 const INLINE_JSON_ARRAY_MAX_ITEMS = 8;
 const INLINE_JSON_ARRAY_MAX_LENGTH = 40;
 const OUTPUT_DECIMAL_PLACES = 1;
+const WEIGHTED_AVAILABILITY_MIN_SCORE = 1;
+const WEIGHTED_AVAILABILITY_MAX_SCORE = 100;
+const WEIGHTED_AVAILABILITY_MIDPOINT_SCORE = 50;
+const WEIGHTED_AVAILABILITY_SCORE_SCALE = 10;
 const APP_ROOT = path.resolve(__dirname, '..');
 const MIN_OMNI_DIFFERENCE = 2.5;
 const MIN_SL_DIFFERENCE = 2.5;
@@ -1482,8 +1490,12 @@ function calcWeightedScore(relativeWeight: number): number {
         return 0;
     }
 
-    const score = 5.5 + calcAvailabilityFromWeight(relativeWeight);
-    return roundOutputValue(Math.min(10, Math.max(1, score)));
+    const score = WEIGHTED_AVAILABILITY_MIDPOINT_SCORE
+        + (calcAvailabilityFromWeight(relativeWeight) * WEIGHTED_AVAILABILITY_SCORE_SCALE);
+    return Math.round(Math.min(
+        WEIGHTED_AVAILABILITY_MAX_SCORE,
+        Math.max(WEIGHTED_AVAILABILITY_MIN_SCORE, score),
+    ));
 }
 
 function mergeCompactWeightedValueForMul(
@@ -1658,7 +1670,7 @@ function averagePositiveWeightedScores(values: number[]): number {
     }
 
     const total = positiveValues.reduce((sum, value) => sum + value, 0);
-    return roundOutputValue(total / positiveValues.length);
+    return Math.round(total / positiveValues.length);
 }
 
 function cloneWeightedByRating(value?: CompactWeightedByRating): CompactWeightedByRating {
@@ -2763,7 +2775,7 @@ function writeJsonFile(filePath: string, data: unknown): void {
     const contents = BEAUTIFY_OUTPUT
         ? formatJsonValue(data) ?? ''
         : JSON.stringify(data);
-    fs.writeFileSync(filePath, contents + os.EOL, 'utf8');
+    writeFileWithContentTimestamp(filePath, contents + os.EOL, 'utf8');
 }
 
 function mergeCompactEraAvailabilityForWrite(

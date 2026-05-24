@@ -67,10 +67,12 @@ interface UnitSearchExecutionRequest {
     unitMatchesAvailabilityFrom?: (unit: Unit, availabilityFromName: string, scope?: AvailabilityFilterScope) => boolean;
     unitMatchesAvailabilityRarity?: (unit: Unit, rarityName: string, scope?: AvailabilityFilterScope) => boolean;
     unitBelongsToForcePack: (unit: Unit, packName: string) => boolean;
+    unitMatchesFormationTarget?: (unit: Unit, formationName: string) => boolean;
     getAllEraNames: () => string[];
     getAllFactionNames: () => string[];
     getAllAvailabilityFromNames?: () => string[];
     getAllAvailabilityRarityNames?: () => string[];
+    getAllFormationNames?: () => string[];
     getDisplayName?: (filterKey: string, value: string) => string | undefined;
     getIndexedUnitIds?: (filterKey: string, value: string, scope?: AvailabilityFilterScope) => ReadonlySet<string> | undefined;
     getIndexedFilterValues?: (filterKey: string) => readonly string[];
@@ -174,10 +176,12 @@ export function executeUnitSearch(request: UnitSearchExecutionRequest): UnitSear
         unitMatchesAvailabilityFrom: request.unitMatchesAvailabilityFrom,
         unitMatchesAvailabilityRarity: request.unitMatchesAvailabilityRarity,
         unitBelongsToForcePack: request.unitBelongsToForcePack,
+        unitMatchesFormationTarget: request.unitMatchesFormationTarget,
         getAllEraNames: request.getAllEraNames,
         getAllFactionNames: request.getAllFactionNames,
         getAllAvailabilityFromNames: request.getAllAvailabilityFromNames,
         getAllAvailabilityRarityNames: request.getAllAvailabilityRarityNames,
+        getAllFormationNames: request.getAllFormationNames,
         getAllForcePackNames: () => getForcePacks().map(pack => pack.name),
         getASMovementValues: (unit: Unit) => {
             const mvm = unit.as?.MVm;
@@ -321,6 +325,10 @@ export function executeUnitSearch(request: UnitSearchExecutionRequest): UnitSear
                     } else if (typeof aValue === 'number' && typeof bValue === 'number') {
                         comparison = aValue - bValue;
                     }
+                }
+
+                if (comparison === 0 && request.sortKey !== 'name') {
+                    comparison = compareUnitsByName(a, b);
                 }
 
                 if (request.sortDirection === 'desc') {

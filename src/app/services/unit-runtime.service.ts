@@ -33,12 +33,11 @@
 
 import { Injectable, inject } from '@angular/core';
 import type { Era } from '../models/eras.model';
-import type { Unit, UnitComponent } from '../models/units.model';
+import type { Unit, UnitComponent, UnitTagEntry } from '../models/units.model';
 import type { EquipmentMap } from '../models/equipment.model';
-import type { TagData } from './db.service';
+import type { TagData, UnitTagData } from './db.service';
 import { TagsService } from './tags.service';
 import { PublicTagsService } from './public-tags.service';
-import { MulUnitSourcesCatalogService } from './catalogs/mul-unit-sources-catalog.service';
 import { UnitSearchIndexService } from './unit-search-index.service';
 
 @Injectable({
@@ -47,7 +46,6 @@ import { UnitSearchIndexService } from './unit-search-index.service';
 export class UnitRuntimeService {
     private readonly tagsService = inject(TagsService);
     private readonly publicTagsService = inject(PublicTagsService);
-    private readonly mulUnitSourcesCatalog = inject(MulUnitSourcesCatalogService);
     private readonly unitSearchIndexService = inject(UnitSearchIndexService);
 
     private unitNameMap = new Map<string, Unit>();
@@ -67,7 +65,6 @@ export class UnitRuntimeService {
     public postprocessUnits(units: Unit[], eras: Era[]): void {
         for (const unit of units) {
             unit._era = this.findEraForYear(unit.year, eras);
-            unit.source = this.mergeUnitSources(unit.source, this.mulUnitSourcesCatalog.getUnitSourcesByMulId(unit.id));
         }
 
         void this.loadUnitTags(units);
@@ -88,20 +85,38 @@ export class UnitRuntimeService {
         this.applyTagDataToUnits(units, tagData);
     }
 
-    public applyTagDataToUnits(units: Unit[], tagData: TagData | null): void {
+    public applyTagDataToUnits(
+        units: Unit[],
+        tagData: TagData | null,
+        options?: { rebuildTagSearchIndex?: boolean }
+    ): void {
+        void this.tagsService.fixNameTagsCoveredByChassis(units, tagData);
         const tags = tagData?.tags || {};
 
         for (const unit of units) {
             const chassisKey = TagsService.getChassisTagKey(unit);
             unit._nameTags = Object.values(tags)
                 .filter(entry => entry.units[unit.name] !== undefined)
-                .map(entry => entry.label);
+                .map(entry => ({
+                    tag: entry.label,
+                    quantity: this.getTagQuantity(entry.units[unit.name])
+                } as UnitTagEntry));
             unit._chassisTags = Object.values(tags)
                 .filter(entry => entry.chassis[chassisKey] !== undefined)
-                .map(entry => entry.label);
+                .map(entry => ({
+                    tag: entry.label,
+                    quantity: this.getTagQuantity(entry.chassis[chassisKey])
+                } as UnitTagEntry));
         }
 
-        this.unitSearchIndexService.rebuildTagSearchIndex(units);
+        if (options?.rebuildTagSearchIndex ?? true) {
+            this.unitSearchIndexService.rebuildTagSearchIndex(units);
+        }
+    }
+
+    private getTagQuantity(unitTagData: UnitTagData | undefined): number {
+        const quantity = unitTagData?.q;
+        return quantity && quantity > 0 ? quantity : 1;
     }
 
     public applyPublicTagsToUnits(units: Unit[]): void {
@@ -126,20 +141,6 @@ export class UnitRuntimeService {
         }
 
         return undefined;
-    }
-
-    private mergeUnitSources(originalSource: string | string[] | undefined, mulSources: string[] | undefined): string[] {
-        const sourcesSet = new Set<string>();
-
-        if (Array.isArray(originalSource)) {
-            originalSource.forEach(source => sourcesSet.add(source));
-        } else if (originalSource) {
-            sourcesSet.add(originalSource);
-        }
-
-        mulSources?.forEach(source => sourcesSet.add(source));
-
-        return Array.from(sourcesSet);
     }
 
     private linkEquipmentToComponents(components: UnitComponent[], equipment: EquipmentMap): void {

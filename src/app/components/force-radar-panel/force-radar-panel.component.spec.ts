@@ -4,6 +4,7 @@ import { GameSystem } from '../../models/common.model';
 import { LoadForceEntry } from '../../models/load-force-entry.model';
 import type { Unit } from '../../models/units.model';
 import { DataService, type BucketStatSummary, type MinMaxStatsRange } from '../../services/data.service';
+import { createEmptyUnit, type TestUnitOverrides } from '../../testing/unit-test-helpers';
 import { ForceRadarPanelComponent } from './force-radar-panel.component';
 
 type MaxStatsOverride = {
@@ -55,89 +56,31 @@ function createMaxStats(overrides: MaxStatsOverride): MinMaxStatsRange {
     };
 }
 
-function createUnit(overrides: Partial<Unit>): Unit {
-    return {
+function createUnit(overrides: TestUnitOverrides): Unit {
+    const { as: asOverrides, ...unitOverrides } = overrides;
+
+    return createEmptyUnit({
         id: 1,
         name: 'Unit',
         chassis: 'Unit',
         model: 'A',
         year: 3050,
-        weightClass: 'Medium',
-        tons: 50,
-        offSpeedFactor: 0,
-        bv: 0,
-        pv: 0,
-        cost: 0,
-        level: 0,
-        techBase: 'Inner Sphere',
-        techRating: 'D',
-        type: 'Mek',
-        subtype: 'BattleMek',
-        omni: 0,
-        engine: 'Fusion',
         engineRating: 250,
         engineHS: 10,
-        engineHSType: 'Heat Sink',
-        source: [],
         role: 'Brawler',
         armorType: 'Standard',
         structureType: 'Standard',
-        armor: 0,
-        armorPer: 0,
         internal: 0,
-        heat: 0,
-        dissipation: 0,
         moveType: 'Biped',
-        walk: 0,
-        walk2: 0,
-        run: 0,
-        run2: 0,
-        jump: 0,
-        jump2: 0,
-        umu: 0,
-        c3: '',
-        dpt: 0,
-        comp: [],
-        su: 0,
-        crewSize: 1,
-        quirks: [],
-        features: [],
-        icon: '',
-        sheets: [],
+        _displayType: 'Mek',
+        ...unitOverrides,
         as: {
             TP: 'BM',
-            PV: 0,
             SZ: 2,
-            TMM: 0,
-            usesOV: false,
-            OV: 0,
-            MV: '0',
             MVm: { '': 0 },
-            usesTh: false,
-            Th: 0,
-            Arm: 0,
-            Str: 0,
-            specials: [],
-            dmg: {
-                dmgS: '0',
-                dmgM: '0',
-                dmgL: '0',
-                dmgE: '0',
-            },
-            usesE: false,
-            usesArcs: false,
+            ...asOverrides,
         },
-        _searchKey: '',
-        _displayType: 'Mek',
-        _maxRange: 0,
-        _weightedMaxRange: 0,
-        _dissipationEfficiency: 0,
-        _mdSumNoPhysical: 0,
-        _mdSumNoPhysicalNoOneshots: 0,
-        _nameTags: [],
-        _chassisTags: [],
-        ...overrides,
-    };
+    });
 }
 
 describe('ForceRadarPanelComponent', () => {
@@ -275,10 +218,10 @@ describe('ForceRadarPanelComponent', () => {
         expect(getAxis('endurance')).toEqual(jasmine.objectContaining({ value: 88, min: 54, max: 170 }));
         expect(getAxis('range')).toEqual(jasmine.objectContaining({ value: 28, min: 22, max: 46 }));
         expect(getAxis('dpt')).toEqual(jasmine.objectContaining({ value: 19, min: 10, max: 40 }));
-        expect(getAxis('mobility')?.ratio).toBeCloseTo(6 / 17, 6);
-        expect(getAxis('endurance')?.ratio).toBeCloseTo(34 / 116, 6);
-        expect(getAxis('range')?.ratio).toBeCloseTo(0.25, 6);
-        expect(getAxis('dpt')?.ratio).toBeCloseTo(0.3, 6);
+        expect(getAxis('mobility')?.ratio).toBeCloseTo(72 / 289, 6);
+        expect(getAxis('endurance')?.ratio).toBeCloseTo(289 / 1682, 6);
+        expect(getAxis('range')?.ratio).toBeCloseTo(0.125, 6);
+        expect(getAxis('dpt')?.ratio).toBeCloseTo(0.18, 6);
     });
 
     it('maps aggregated bucket averages to the midpoint ring', () => {
@@ -375,10 +318,10 @@ describe('ForceRadarPanelComponent', () => {
         expect(getAxis('endurance')).toEqual(jasmine.objectContaining({ value: 40, min: 15, max: 62 }));
         expect(getAxis('range')).toEqual(jasmine.objectContaining({ value: 8, min: 6, max: 14 }));
         expect(getAxis('dpt')).toEqual(jasmine.objectContaining({ value: 7, min: 3, max: 15 }));
-        expect(getAxis('mobility')?.ratio).toBeCloseTo(3 / 7, 6);
-        expect(getAxis('endurance')?.ratio).toBeCloseTo(25 / 47, 6);
-        expect(getAxis('range')?.ratio).toBeCloseTo(0.25, 6);
-        expect(getAxis('dpt')?.ratio).toBeCloseTo(1 / 3, 6);
+        expect(getAxis('mobility')?.ratio).toBeCloseTo(18 / 49, 6);
+        expect(getAxis('endurance')?.ratio).toBeCloseTo(1241 / 2209, 6);
+        expect(getAxis('range')?.ratio).toBeCloseTo(0.125, 6);
+        expect(getAxis('dpt')?.ratio).toBeCloseTo(2 / 9, 6);
         expect(fixture.nativeElement.querySelectorAll('.radar-hover-node').length).toBe(4);
         const classicHoveredLabels = Array.from(fixture.nativeElement.querySelectorAll('.radar-label-value-hover')) as SVGTextElement[];
 
@@ -408,7 +351,7 @@ describe('ForceRadarPanelComponent', () => {
         const mobilityAxis = fixture.componentInstance.chartAxes().find((axis) => axis.key === 'mobility');
 
         expect(mobilityAxis).toEqual(jasmine.objectContaining({ value: 6, min: 1, max: 7 }));
-        expect(mobilityAxis?.ratio).toBeCloseTo(5 / 6, 6);
+        expect(mobilityAxis?.ratio).toBeCloseTo(17 / 18, 6);
     });
 
     it('aggregates Alpha Strike radar stats from global as.TP maxima', () => {
@@ -490,9 +433,9 @@ describe('ForceRadarPanelComponent', () => {
         expect(getAxis('shortRangeDamage')).toEqual(jasmine.objectContaining({ value: 5, min: 2, max: 6 }));
         expect(getAxis('mediumRangeDamage')).toEqual(jasmine.objectContaining({ value: 5, min: 3, max: 7 }));
         expect(getAxis('longRangeDamage')).toEqual(jasmine.objectContaining({ value: 5, min: 3, max: 7 }));
-        expect(getAxis('mobility')?.ratio).toBeCloseTo(1 / 3, 6);
-        expect(getAxis('endurance')?.ratio).toBeCloseTo(5 / 9, 6);
-        expect(getAxis('shortRangeDamage')?.ratio).toBeCloseTo(0.75, 6);
+        expect(getAxis('mobility')?.ratio).toBeCloseTo(2 / 9, 6);
+        expect(getAxis('endurance')?.ratio).toBeCloseTo(49 / 81, 6);
+        expect(getAxis('shortRangeDamage')?.ratio).toBeCloseTo(0.875, 6);
         expect(getAxis('mediumRangeDamage')?.ratio).toBeCloseTo(0.5, 6);
         expect(getAxis('longRangeDamage')?.ratio).toBeCloseTo(0.5, 6);
     });
@@ -578,8 +521,8 @@ describe('ForceRadarPanelComponent', () => {
         expect(getAxis('shortRangeDamage')).toEqual(jasmine.objectContaining({ value: 2, min: 1, max: 2 }));
         expect(getAxis('mediumRangeDamage')).toEqual(jasmine.objectContaining({ value: 3, min: 2, max: 4 }));
         expect(getAxis('longRangeDamage')).toEqual(jasmine.objectContaining({ value: 4, min: 3, max: 5 }));
-        expect(getAxis('mobility')?.ratio).toBeCloseTo(1 / 3, 6);
-        expect(getAxis('endurance')?.ratio).toBeCloseTo(1 / 3, 6);
+        expect(getAxis('mobility')?.ratio).toBeCloseTo(2 / 9, 6);
+        expect(getAxis('endurance')?.ratio).toBeCloseTo(2 / 9, 6);
         expect(getAxis('shortRangeDamage')?.ratio).toBeCloseTo(1, 6);
         expect(getAxis('mediumRangeDamage')?.ratio).toBeCloseTo(0.5, 6);
         expect(getAxis('longRangeDamage')?.ratio).toBeCloseTo(0.5, 6);

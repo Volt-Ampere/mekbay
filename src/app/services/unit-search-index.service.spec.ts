@@ -1,92 +1,55 @@
 import type { Unit } from '../models/units.model';
+import { createEmptyUnit, type TestUnitOverrides } from '../testing/unit-test-helpers';
 import { UnitSearchIndexService } from './unit-search-index.service';
 
-function createUnit(overrides: Partial<Unit>): Unit {
-    return {
+function createUnit(overrides: TestUnitOverrides): Unit {
+    const { as: asOverrides, ...unitOverrides } = overrides;
+
+    return createEmptyUnit({
         id: 1,
         name: 'Unit',
         chassis: 'Unit',
         model: 'A',
         year: 3050,
-        weightClass: 'Medium',
-        tons: 50,
-        offSpeedFactor: 0,
-        bv: 0,
-        pv: 0,
-        cost: 0,
-        level: 0,
-        techBase: 'Inner Sphere',
-        techRating: 'D',
-        type: 'Mek',
-        subtype: 'BattleMek',
-        omni: 0,
-        engine: 'Fusion',
         engineRating: 250,
         engineHS: 10,
-        engineHSType: 'Heat Sink',
-        source: [],
         role: 'Brawler',
         armorType: 'Standard',
         structureType: 'Standard',
-        armor: 0,
-        armorPer: 0,
         internal: 0,
-        heat: 0,
-        dissipation: 0,
         moveType: 'Biped',
-        walk: 0,
-        walk2: 0,
-        run: 0,
-        run2: 0,
-        jump: 0,
-        jump2: 0,
-        umu: 0,
-        c3: '',
-        dpt: 0,
-        comp: [],
-        su: 0,
-        crewSize: 1,
-        quirks: [],
-        features: [],
-        icon: '',
-        sheets: [],
+        _displayType: 'Mek',
+        ...unitOverrides,
         as: {
             TP: 'BM',
-            PV: 0,
             SZ: 2,
-            TMM: 0,
-            usesOV: false,
-            OV: 0,
-            MV: '0',
             MVm: { '': 0 },
-            usesTh: false,
-            Th: 0,
-            Arm: 0,
-            Str: 0,
-            specials: [],
-            dmg: {
-                dmgS: '0',
-                dmgM: '0',
-                dmgL: '0',
-                dmgE: '0',
-            },
-            usesE: false,
-            usesArcs: false,
+            ...asOverrides,
         },
-        _searchKey: '',
-        _displayType: 'Mek',
-        _maxRange: 0,
-        _weightedMaxRange: 0,
-        _dissipationEfficiency: 0,
-        _mdSumNoPhysical: 0,
-        _mdSumNoPhysicalNoOneshots: 0,
-        _nameTags: [],
-        _chassisTags: [],
-        ...overrides,
-    };
+    });
 }
 
 describe('UnitSearchIndexService', () => {
+    it('indexes Alpha Strike zero-star damage between zero and one', () => {
+        const service = new UnitSearchIndexService();
+        const unit = createUnit({
+            name: 'Zero Star Mek',
+            subtype: 'BattleMek',
+            as: {
+                TP: 'BM',
+                dmg: { dmgS: '0*', dmgM: '1', dmgL: '0', dmgE: '0*' },
+            },
+        });
+
+        service.prepareUnits([unit]);
+
+        expect(unit.as.dmg._dmgS).toBe(0.5);
+        expect(unit.as.dmg._dmgM).toBe(1);
+        expect(unit.as.dmg._dmgL).toBe(0);
+        expect(unit.as.dmg._dmgE).toBe(0.5);
+        expect(service.getASUnitTypeMaxStats('BM').asDmgS).toEqual({ min: 0.5, max: 0.5, average: 0.5 });
+    });
+
     it('tracks min, max, and average stats by subtype and alpha strike type', () => {
         const service = new UnitSearchIndexService();
 
@@ -240,5 +203,42 @@ describe('UnitSearchIndexService', () => {
         expect(service.getUnitSubtypeMaxStats('Missing').weightedMaxRange).toEqual({ min: 0, max: 0, average: 0 });
         expect(service.getASUnitTypeMaxStats('Missing').asTmm).toEqual({ min: 0, max: 0, average: 0 });
         expect(service.getUnitSubtypeMaxStats('Missing').gravDecks).toEqual({ min: 0, max: 0, average: 0 });
+    });
+
+    it('indexes the exported source filter without duplicating published values', () => {
+        const service = new UnitSearchIndexService();
+        const unit = createUnit({
+            name: 'Atlas AS7-D',
+            source: ['TR:3039', 'TR:SW', 'RSFP:Wave 2', 'RS:Gothic'],
+            published: ['RSFP:Wave 2', 'RS:Gothic'],
+        });
+
+        service.rebuildIndexes([unit], [], []);
+
+        expect(service.getIndexedFilterValues('source')).toEqual(['RS:Gothic', 'RSFP:Wave 2', 'TR:3039', 'TR:SW']);
+        expect(service.getIndexedUnitIds('source', 'TR:3039')).toEqual(new Set(['Atlas AS7-D']));
+        expect(service.getIndexedUnitIds('source', 'RS:Gothic')).toEqual(new Set(['Atlas AS7-D']));
+        expect(service.getDropdownOptionUniverse('source')).toEqual([
+            { name: 'RS:Gothic' },
+            { name: 'RSFP:Wave 2' },
+            { name: 'TR:3039' },
+            { name: 'TR:SW' },
+        ]);
+    });
+
+    it('indexes canon and published status as yes/no values', () => {
+        const service = new UnitSearchIndexService();
+
+        service.rebuildIndexes([
+            createUnit({ name: 'Canon Published', canon: true, published: ['RS:3050'] }),
+            createUnit({ name: 'Non-Canon Unpublished', canon: false, published: [] }),
+        ], [], []);
+
+        expect(service.getIndexedFilterValues('canon')).toEqual(['no', 'yes']);
+        expect(service.getIndexedUnitIds('canon', 'yes')).toEqual(new Set(['Canon Published']));
+        expect(service.getIndexedUnitIds('canon', 'no')).toEqual(new Set(['Non-Canon Unpublished']));
+        expect(service.getIndexedFilterValues('published')).toEqual(['no', 'yes']);
+        expect(service.getIndexedUnitIds('published', 'yes')).toEqual(new Set(['Canon Published']));
+        expect(service.getIndexedUnitIds('published', 'no')).toEqual(new Set(['Non-Canon Unpublished']));
     });
 });

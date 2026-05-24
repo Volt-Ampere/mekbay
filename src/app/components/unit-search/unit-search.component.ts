@@ -47,7 +47,7 @@ import { type HighlightToken, tokenizeForHighlight } from '../../utils/semantic-
 import { isFilterAvailableForAvailabilitySource } from '../../utils/unit-search-filter-config.util';
 import type { Unit } from '../../models/units.model';
 import { ForceBuilderService } from '../../services/force-builder.service';
-import { Overlay, type OverlayRef } from '@angular/cdk/overlay';
+import { Overlay, OverlayModule, type ConnectedPosition, type OverlayRef } from '@angular/cdk/overlay';
 import { ComponentPortal } from '@angular/cdk/portal';
 import { UnitDetailsDialogComponent, type UnitDetailsDialogData } from '../unit-details-dialog/unit-details-dialog.component';
 import { firstValueFrom } from 'rxjs';
@@ -73,10 +73,12 @@ import { TaggingService } from '../../services/tagging.service';
 import { AsAbilityLookupService } from '../../services/as-ability-lookup.service';
 import { AbilityInfoDialogComponent, type AbilityInfoDialogData } from '../ability-info-dialog/ability-info-dialog.component';
 import { SyntaxInputComponent } from '../syntax-input/syntax-input.component';
+import { formatASDamageValue, isASDamageFilterKey } from '../../utils/as-damage.util';
 import { SavedSearchesService } from '../../services/saved-searches.service';
 import { generateUUID } from '../../services/ws.service';
 import { GameSystem } from '../../models/common.model';
 import { AS_TYPE_DISPLAY_NAMES, DROPDOWN_FILTERS, RANGE_FILTERS } from '../../services/unit-search-filters.model';
+import { KeyboardShortcutService } from '../../services/keyboard-shortcut.service';
 import { UnitDetailsPanelComponent } from '../unit-details-panel/unit-details-panel.component';
 import { UnitCardExpandedComponent } from '../unit-card-expanded/unit-card-expanded.component';
 import { AlphaStrikeCardComponent } from '../alpha-strike-card/alpha-strike-card.component';
@@ -85,9 +87,11 @@ import type { UnitType } from '../../models/units.model';
 import { BVCalculatorUtil } from '../../utils/bv-calculator.util';
 import { DataTableComponent, type DataTableCellContext, type DataTableColumn, type DataTableRowClickEvent, type DataTableRowLongPressEvent, type DataTableRowPointerEnterEvent, type DataTableSortEvent } from '../data-table/data-table.component';
 import { UnitSearchFiltersService } from '../../services/unit-search-filters.service';
+import { getUnitVariantGroupIdentity, getUnitVariantGroupKey, type UnitVariantGroupIdentity, unitMatchesVariantGroup } from '../../utils/unit-variant.util';
 
 /** Grouped chassis entry for compact view */
-export interface ChassisGroup {
+export interface ChassisGroup extends UnitVariantGroupIdentity {
+    key: string;
     chassis: string;
     type: UnitType;
     displayType: string;
@@ -102,10 +106,31 @@ export interface ChassisGroup {
     units: Unit[];
 }
 
+type UnitSearchViewMode = 'list' | 'card' | 'chassis' | 'table';
+
+interface ViewModeOptionConfig {
+    mode: UnitSearchViewMode;
+    label: string;
+    caption: string;
+    gameSystem?: GameSystem;
+    requiresExpanded?: boolean;
+}
+
+interface ViewModeOption extends ViewModeOptionConfig {
+    disabled: boolean;
+    disabledReason: string | null;
+    willExpand: boolean;
+}
+
+interface ActiveVariantGroupFilter extends UnitVariantGroupIdentity {
+    key: string;
+    representativeUnit: Unit;
+}
+
 @Component({
     selector: 'unit-search',
     changeDetection: ChangeDetectionStrategy.OnPush,
-    imports: [CommonModule, ScrollingModule, LongPressDirective, TooltipDirective, AdjustedPV, FormatNumberPipe, UnitIconComponent, UnitTagsComponent, SyntaxInputComponent, UnitSearchAdvancedFiltersComponent, UnitDetailsPanelComponent, UnitCardExpandedComponent, AlphaStrikeCardComponent, DataTableComponent],
+    imports: [CommonModule, ScrollingModule, OverlayModule, LongPressDirective, TooltipDirective, AdjustedPV, FormatNumberPipe, UnitIconComponent, UnitTagsComponent, SyntaxInputComponent, UnitSearchAdvancedFiltersComponent, UnitDetailsPanelComponent, UnitCardExpandedComponent, AlphaStrikeCardComponent, DataTableComponent],
     templateUrl: './unit-search.component.html',
     styleUrl: './unit-search.component.scss',
     host: {
@@ -114,6 +139,28 @@ export interface ChassisGroup {
     }
 })
 export class UnitSearchComponent {
+    private static supportsCssAnchorPositioning(): boolean {
+        const css = globalThis.CSS;
+        return !!css?.supports
+            && css.supports('position-anchor: --unit-searchbar')
+            && css.supports('top: anchor(bottom)')
+            && css.supports('width: anchor-size(width)');
+    }
+
+    private static readonly VIEW_MODE_MENU_POSITIONS: ConnectedPosition[] = [
+        { originX: 'start', originY: 'bottom', overlayX: 'start', overlayY: 'top', offsetY: 4 },
+        { originX: 'start', originY: 'top', overlayX: 'start', overlayY: 'bottom', offsetY: -4 },
+        { originX: 'end', originY: 'bottom', overlayX: 'end', overlayY: 'top', offsetY: 4 },
+        { originX: 'end', originY: 'top', overlayX: 'end', overlayY: 'bottom', offsetY: -4 },
+    ];
+
+    private static readonly VIEW_MODE_OPTIONS: readonly ViewModeOptionConfig[] = [
+        { mode: 'list', label: 'List View', caption: 'Result cards' },
+        { mode: 'card', label: 'Card View', caption: 'Alpha Strike cards', gameSystem: GameSystem.ALPHA_STRIKE },
+        { mode: 'chassis', label: 'Chassis View', caption: 'Grouped chassis' },
+        { mode: 'table', label: 'Table View', caption: 'Expanded table', requiresExpanded: true },
+    ];
+
     readonly gameSystemEnum = GameSystem;
     layoutService = inject(LayoutService);
     filtersService = inject(UnitSearchFiltersService);
@@ -131,12 +178,14 @@ export class UnitSearchComponent {
     private optionsService = inject(OptionsService);
     private taggingService = inject(TaggingService);
     private savedSearchesService = inject(SavedSearchesService);
+    private keyboardShortcutService = inject(KeyboardShortcutService);
 
     readonly useHex = computed(() => this.optionsService.options().ASUseHex);
     readonly cardStyle = computed(() => this.optionsService.options().ASCardStyle);
     readonly megaMekAvailabilitySourceSelected = computed(() => this.optionsService.options().availabilitySource === 'megamek');
     /** Whether the layout is filters-list-panel (filters on left) */
     readonly filtersOnLeft = computed(() => this.optionsService.options().unitSearchExpandedViewLayout === 'filters-list-panel');
+    readonly supportsCssAnchorPositioning = UnitSearchComponent.supportsCssAnchorPositioning();
 
     public readonly SORT_OPTIONS = SORT_OPTIONS;
     readonly unitTypeDisplayNames = AS_TYPE_DISPLAY_NAMES;
@@ -171,9 +220,12 @@ export class UnitSearchComponent {
     private searchDebounceTimer: any;
     private heightTrackingDebounceTimer: any;
     private readonly SEARCH_DEBOUNCE_MS = 300;
+    private resultPointerHoverSuppressedUntil = 0;
+    private pendingSearchText: string | null = null;
 
     private static readonly CHORD_ACTIVATE_KEY = 'f';
     private static readonly CHORD_TIMEOUT_MS = 1500;
+    private static readonly RESULT_POINTER_HOVER_SUPPRESSION_MS = 160;
     private static readonly FILTER_CHORD_BINDINGS: { key: string; filterKey: string }[] = [
         // Alpha Strike
         { key: 'p', filterKey: 'as.PV' },
@@ -221,6 +273,8 @@ export class UnitSearchComponent {
     private favoritesDialogActive = false;
     /** Immediate input value for instant highlighting (not debounced). */
     readonly immediateSearchText = signal('');
+    private readonly searchCommitPending = signal(false);
+    private readonly pendingResultOpenRequest = signal(false);
 
     syntaxInput = viewChild<SyntaxInputComponent>('syntaxInput');
     advBtn = viewChild.required<ElementRef<HTMLButtonElement>>('advBtn');
@@ -255,8 +309,10 @@ export class UnitSearchComponent {
     advPanelDocked = computed(() => this.expandedView() && this.advOpen() && this.layoutService.windowWidth() >= 900);
     advPanelUserColumns = signal<1 | 2 | null>(null);
     focused = signal(false);
+    viewModeMenuOpen = signal(false);
     activeIndex = signal<number | null>(null);
     selectedUnits = signal<Set<string>>(new Set());
+    readonly activeVariantGroupFilter = signal<ActiveVariantGroupFilter | null>(null);
     private unitDetailsDialogOpen = signal(false);
 
      /**
@@ -266,7 +322,7 @@ export class UnitSearchComponent {
       * - 'chassis' : compact chassis-grouped view
       * - 'table'   : expanded table view
       */
-     viewMode = signal<'list' | 'card' | 'chassis' | 'table'>(this.optionsService.options().unitSearchViewMode);
+    viewMode = signal<UnitSearchViewMode>(this.optionsService.options().unitSearchViewMode);
 
 
 
@@ -286,13 +342,31 @@ export class UnitSearchComponent {
     private readonly cardViewGapPx = 4;
     private readonly cardViewRowPaddingPx = 4;
     private readonly resultsDropdownWidth = signal(0);
+    readonly displayedUnits = computed(() => {
+        const units = this.filtersService.filteredUnits();
+        const variantGroupFilter = this.activeVariantGroupFilter();
+        if (!variantGroupFilter) return units;
+
+        return units.filter(unit => unitMatchesVariantGroup(unit, variantGroupFilter));
+    });
+    readonly activeVariantGroupRepresentativeUnit = computed(() => {
+        return this.displayedUnits()[0] ?? this.activeVariantGroupFilter()?.representativeUnit ?? null;
+    });
+    readonly activeVariantGroupTitle = computed(() => {
+        const variantGroupFilter = this.activeVariantGroupFilter();
+        return variantGroupFilter ? this.formatVariantGroupTitle(variantGroupFilter) : '';
+    });
+    readonly activeVariantGroupMeta = computed(() => {
+        const variantGroupFilter = this.activeVariantGroupFilter();
+        return variantGroupFilter ? this.formatVariantGroupMeta(variantGroupFilter, this.displayedUnits().length) : '';
+    });
     readonly cardViewColumnCount = computed(() => {
         const measuredWidth = this.resultsDropdownWidth();
         const availableWidth = Math.max(0, measuredWidth - (this.cardViewRowPaddingPx * 2));
         return Math.max(1, Math.floor((availableWidth + this.cardViewGapPx) / (this.cardViewMinWidthPx + this.cardViewGapPx)));
     });
     readonly cardViewRows = computed(() => {
-        const units = this.filtersService.filteredUnits();
+        const units = this.displayedUnits();
         const columnCount = this.cardViewColumnCount();
         const rows: Unit[][] = [];
 
@@ -311,22 +385,42 @@ export class UnitSearchComponent {
         return 'List View';
     });
 
+    readonly viewModeMenuPositions = UnitSearchComponent.VIEW_MODE_MENU_POSITIONS;
+    readonly viewModeMenuScrollStrategy = this.overlay.scrollStrategies.reposition();
+
+    readonly viewModeOptions = computed((): ViewModeOption[] => {
+        const gameSystem = this.gameSystem();
+        const expanded = this.expandedView();
+
+        return UnitSearchComponent.VIEW_MODE_OPTIONS.map(option => {
+            const disabled = option.gameSystem != null && option.gameSystem !== gameSystem;
+            return {
+                ...option,
+                disabled,
+                disabledReason: disabled ? `${option.label} is unavailable in the current game system` : null,
+                willExpand: !disabled && !!option.requiresExpanded && !expanded,
+            };
+        });
+    });
+
     /**
-     * Units grouped by chassis+type for compact view.
+     * Units grouped by chassis+Alpha Strike type+omni status for compact view.
      * Each group contains summary info (BV range, tonnage, year range, variant count).
      */
     readonly groupedUnits = computed((): ChassisGroup[] => {
         const units = this.filtersService.filteredUnits();
         if (units.length === 0) return [];
 
-        const isAS = this.gameService.isAlphaStrike();
         const map = new Map<string, ChassisGroup>();
 
         for (const unit of units) {
-            const key = `${unit.type}|||${unit.chassis}`;
+            const key = getUnitVariantGroupKey(unit);
             let group = map.get(key);
             if (!group) {
+                const identity = getUnitVariantGroupIdentity(unit);
                 group = {
+                    key,
+                    ...identity,
                     chassis: unit.chassis,
                     type: unit.type,
                     displayType: unit._displayType,
@@ -357,16 +451,29 @@ export class UnitSearchComponent {
     private inlinePanelIndex = computed(() => {
         const unit = this.inlinePanelUnit();
         if (!unit) return -1;
-        return this.filtersService.filteredUnits().findIndex(u => u.name === unit.name);
+        return this.displayedUnits().findIndex(u => u.name === unit.name);
     });
 
     /** Whether there is a previous unit to navigate to in the inline panel */
     inlinePanelHasPrev = computed(() => this.inlinePanelIndex() > 0);
 
+    /** Previous unit preview for the inline details panel */
+    inlinePanelPrevUnit = computed(() => {
+        const index = this.inlinePanelIndex();
+        return index > 0 ? this.displayedUnits()[index - 1] ?? null : null;
+    });
+
     /** Whether there is a next unit to navigate to in the inline panel */
     inlinePanelHasNext = computed(() => {
         const index = this.inlinePanelIndex();
-        return index >= 0 && index < this.filtersService.filteredUnits().length - 1;
+        return index >= 0 && index < this.displayedUnits().length - 1;
+    });
+
+    /** Next unit preview for the inline details panel */
+    inlinePanelNextUnit = computed(() => {
+        const index = this.inlinePanelIndex();
+        const units = this.displayedUnits();
+        return index >= 0 && index < units.length - 1 ? units[index + 1] ?? null : null;
     });
 
     /** Keys already visible in the chassis view (PV for AS, BV for CBT) */
@@ -637,7 +744,7 @@ export class UnitSearchComponent {
             columns.push({
                 id: 'tags',
                 header: 'Tags',
-                track: '120px',
+                track: '230px',
                 cellTemplate: tagsCell,
                 headerClass: 'as-th-tags',
                 cellClass: 'as-td-tags',
@@ -801,7 +908,7 @@ export class UnitSearchComponent {
             {
                 id: 'tags',
                 header: 'Tags',
-                track: '120px',
+                track: '230px',
                 cellTemplate: tagsCell,
                 headerClass: 'as-th-tags',
                 cellClass: 'as-td-tags',
@@ -830,6 +937,7 @@ export class UnitSearchComponent {
         height: '100%',
         columnsCount: 1,
     });
+    readonly advPanelAnchoredBelow = signal(false);
     resultsDropdownStyle = signal<{ top: string, width: string, height: string }>({
         top: '0px',
         width: '100%',
@@ -880,7 +988,7 @@ export class UnitSearchComponent {
             return true;
         }
         const wantsVisible = (this.focused() || this.advOpen() || this.unitDetailsDialogOpen()) &&
-            (this.filtersService.searchText() || this.isAdvActive());
+            (this.filtersService.searchText() || this.isAdvActive() || this.activeVariantGroupFilter());
         if (!wantsVisible) return false;
         // If search results are current, show immediately
         if (this.filtersService.isSearchSettled()) return true;
@@ -938,6 +1046,12 @@ export class UnitSearchComponent {
     private advPanelDragStartWidth = 0;
 
     constructor() {
+        this.keyboardShortcutService.register({
+            id: 'unit-search-results',
+            active: () => this.resultsVisible() && this.displayedUnits().length > 0,
+            handle: (event) => this.handleSearchResultsShortcutKeyDown(event),
+        }, this.destroyRef);
+
         // Track panel visibility for flicker prevention (must be a plain boolean, not a signal,
         // so the computed reads it as a snapshot without creating a reactive dependency)
         effect(() => {
@@ -968,6 +1082,16 @@ export class UnitSearchComponent {
                 if (closeRequest.exitExpandedView) {
                     this.expandedView.set(false);
                 }
+            });
+        });
+        effect(() => {
+            if (!this.pendingResultOpenRequest()) return;
+            if (this.isResultOpenBlockedByPendingSearch()) return;
+
+            const items = this.displayedUnits();
+            untracked(() => {
+                this.pendingResultOpenRequest.set(false);
+                this.openCurrentSearchResult(items);
             });
         });
         // Keep the filters service in sync with the current force total BV/PV
@@ -1001,11 +1125,13 @@ export class UnitSearchComponent {
         effect(() => {
             const savedViewMode = this.optionsService.options().unitSearchViewMode;
             const normalizedViewMode = this.normalizeViewMode(savedViewMode);
+            const shouldPersistNormalizedViewMode = savedViewMode !== normalizedViewMode
+                && !(savedViewMode === 'chassis' && normalizedViewMode === 'list' && this.activeVariantGroupFilter());
             untracked(() => {
                 if (this.viewMode() !== normalizedViewMode) {
                     this.viewMode.set(normalizedViewMode);
                 }
-                if (savedViewMode !== normalizedViewMode) {
+                if (shouldPersistNormalizedViewMode) {
                     void this.optionsService.setOption('unitSearchViewMode', normalizedViewMode);
                 }
             });
@@ -1287,7 +1413,7 @@ export class UnitSearchComponent {
                 this.filtersService.advOpen();
                 this.advPanelUserColumns();
             }
-            this.filtersService.filteredUnits();
+            this.displayedUnits();
             debouncedUpdateHeights();
         });
 
@@ -1348,8 +1474,10 @@ export class UnitSearchComponent {
     }
 
     public closeAllPanels() {
+        this.pendingResultOpenRequest.set(false);
         this.focused.set(false);
         this.advOpen.set(false);
+        this.viewModeMenuOpen.set(false);
         this.activeIndex.set(null);
         this.blurInput();
     }
@@ -1384,14 +1512,33 @@ export class UnitSearchComponent {
     setSearch(val: string) {
         // Update immediately for instant highlighting
         this.immediateSearchText.set(val);
+        this.activeIndex.set(null);
+        this.pendingResultOpenRequest.set(false);
         // Debounce the actual search/filtering
         if (this.searchDebounceTimer) {
             clearTimeout(this.searchDebounceTimer);
         }
-        this.searchDebounceTimer = setTimeout(() => {
-            this.filtersService.setSearchText(val);
-            this.activeIndex.set(null);
-        }, this.SEARCH_DEBOUNCE_MS);
+        this.pendingSearchText = val;
+        this.searchCommitPending.set(true);
+        this.searchDebounceTimer = setTimeout(() => this.flushPendingSearch(), this.SEARCH_DEBOUNCE_MS);
+    }
+
+    private flushPendingSearch() {
+        if (this.searchDebounceTimer) {
+            clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = undefined;
+        }
+
+        if (this.pendingSearchText === null) {
+            this.searchCommitPending.set(false);
+            return;
+        }
+
+        const nextSearchText = this.pendingSearchText;
+        this.pendingSearchText = null;
+        this.filtersService.setSearchText(nextSearchText);
+        this.activeIndex.set(null);
+        this.searchCommitPending.set(false);
     }
 
     closeAdvPanel() {
@@ -1406,6 +1553,10 @@ export class UnitSearchComponent {
     }
 
     updateResultsDropdownPosition() {
+        if (this.supportsCssAnchorPositioning && !this.expandedView()) {
+            return;
+        }
+
         const gap = 4;
 
         const { top: safeTop, bottom: safeBottom } = this.layoutService.getSafeAreaInsets();
@@ -1439,7 +1590,7 @@ export class UnitSearchComponent {
         }
 
         let height;
-        if (this.filtersService.filteredUnits().length > 0) {
+        if (this.displayedUnits().length > 0) {
             const availableHeight = viewportHeight - baseTop - Math.max(4, safeBottom);
             height = `${availableHeight}px`;
         } else {
@@ -1478,6 +1629,7 @@ export class UnitSearchComponent {
             }
         }
         let panelWidth = columns === 2 ? doublePanelWidth : singlePanelWidth;
+        const opensBelow = !this.advPanelDocked() && spaceAvailable < panelWidth;
 
         let left: number;
         let top: number;
@@ -1516,6 +1668,7 @@ export class UnitSearchComponent {
             height: `${availableHeight}px`,
             columnsCount: columns
         });
+        this.advPanelAnchoredBelow.set(opensBelow);
     }
 
     setAdvFilter(key: string, value: any) {
@@ -1597,7 +1750,11 @@ export class UnitSearchComponent {
         }
         if (event.key === 'Escape') {
             event.stopPropagation();
-            if (this.advOpen()) {
+            this.pendingResultOpenRequest.set(false);
+            if (this.viewModeMenuOpen()) {
+                this.closeViewModeMenu();
+                return;
+            } else if (this.advOpen()) {
                 this.closeAdvPanel();
                 this.focusInput();
                 return;
@@ -1611,49 +1768,131 @@ export class UnitSearchComponent {
             }
             return;
         }
-        if (['ArrowDown', 'ArrowUp', 'Enter'].includes(event.key)) {
-            const items = this.filtersService.filteredUnits();
+        if (event.key === 'Enter') {
+            if (this.requestOpenCurrentSearchResult()) {
+                event.preventDefault();
+            }
+            return;
+        }
+        if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
+            const items = this.displayedUnits();
             if (items.length === 0) return;
-            const currentActiveIndex = this.activeIndex();
             switch (event.key) {
                 case 'ArrowDown':
                     event.preventDefault();
-                    const nextIndex = currentActiveIndex !== null ? Math.min(currentActiveIndex + 1, items.length - 1) : 0;
-                    this.activeIndex.set(nextIndex);
-                    this.scrollToIndex(nextIndex);
+                    this.navigateSearchResults('next', items);
                     break;
                 case 'ArrowUp':
                     event.preventDefault();
-                    if (currentActiveIndex !== null && currentActiveIndex > 0) {
-                        const prevIndex = currentActiveIndex - 1;
-                        this.activeIndex.set(prevIndex);
-                        this.scrollToIndex(prevIndex);
-                    } else {
-                        this.activeIndex.set(null);
-                        this.focusInput();
-                    }
-                    break;
-                case 'Enter':
-                    event.preventDefault();
-                    if (currentActiveIndex !== null) {
-                        this.showUnitDetails(items[currentActiveIndex]);
-                    } else if (items.length > 0) {
-                        this.showUnitDetails(items[0]);
-                    }
+                    this.navigateSearchResults('previous', items);
                     break;
             }
         }
     }
 
-    private scrollToIndex(index: number) {
-        this.currentViewport()?.scrollToIndex(this.getViewportItemIndex(index), 'smooth');
+    private isResultOpenBlockedByPendingSearch(): boolean {
+        return this.searchCommitPending() || !this.filtersService.isSearchSettled();
+    }
+
+    private requestOpenCurrentSearchResult(): boolean {
+        this.flushPendingSearch();
+
+        if (this.isResultOpenBlockedByPendingSearch()) {
+            this.pendingResultOpenRequest.set(true);
+            return true;
+        }
+
+        return this.openCurrentSearchResult();
+    }
+
+    private openCurrentSearchResult(items = this.displayedUnits()): boolean {
+        if (items.length === 0) return false;
+
+        const currentActiveIndex = this.activeIndex();
+        const index = currentActiveIndex !== null && currentActiveIndex >= 0 && currentActiveIndex < items.length
+            ? currentActiveIndex
+            : 0;
+        this.showUnitDetails(items[index]);
+        return true;
+    }
+
+    private handleSearchResultsShortcutKeyDown(event: KeyboardEvent): boolean {
+        if (event.ctrlKey || event.altKey || event.metaKey) return false;
+
+        if (event.key === 'ArrowDown') {
+            return this.navigateSearchResults('next');
+        } else if (event.key === 'ArrowUp') {
+            return this.navigateSearchResults('previous');
+        }
+
+        return false;
+    }
+
+    private navigateSearchResults(direction: 'next' | 'previous', items = this.displayedUnits()): boolean {
+        if (items.length === 0) return false;
+
+        this.suppressResultPointerHover();
+        const currentActiveIndex = this.activeIndex();
+        if (direction === 'next') {
+            const nextIndex = currentActiveIndex !== null ? Math.min(currentActiveIndex + 1, items.length - 1) : 0;
+            if (nextIndex === currentActiveIndex) return true;
+
+            this.selectResultIndex(nextIndex, items, 'auto');
+            return true;
+        }
+
+        if (currentActiveIndex !== null && currentActiveIndex > 0) {
+            const prevIndex = currentActiveIndex - 1;
+            this.selectResultIndex(prevIndex, items, 'auto');
+        } else {
+            if (currentActiveIndex !== null) {
+                this.setActiveResultIndex(null, items);
+            }
+            this.focusInput();
+        }
+        return true;
+    }
+
+    onResultPointerEnter(index: number): void {
+        if (this.shouldIgnoreResultPointerHover()) return;
+
+        this.activeIndex.set(index);
+    }
+
+    private suppressResultPointerHover(): void {
+        this.resultPointerHoverSuppressedUntil = Date.now() + UnitSearchComponent.RESULT_POINTER_HOVER_SUPPRESSION_MS;
+    }
+
+    private shouldIgnoreResultPointerHover(): boolean {
+        return Date.now() < this.resultPointerHoverSuppressedUntil;
+    }
+
+    private selectResultIndex(index: number, items = this.displayedUnits(), behavior: ScrollBehavior = 'smooth'): void {
+        this.suppressResultPointerHover();
+        this.setActiveResultIndex(index, items);
+        this.scrollToMakeVisible(index, behavior);
+    }
+
+    private setActiveResultIndex(index: number | null, items = this.displayedUnits()): void {
+        this.activeIndex.set(index);
+
+        if (index !== null) {
+            const unit = items[index];
+            if (unit) {
+                this.inlinePanelUnit.set(unit);
+            }
+        }
+    }
+
+    private scrollToIndex(index: number, behavior: ScrollBehavior = 'smooth') {
+        this.currentViewport()?.scrollToIndex(this.getViewportItemIndex(index), behavior);
     }
 
     /**
      * Scroll to make the item at the given index visible, but only if it's not already visible.
      * If scrolling is needed, positions the item at the nearest edge (top or bottom).
      */
-    private scrollToMakeVisible(index: number) {
+    private scrollToMakeVisible(index: number, behavior: ScrollBehavior = 'smooth') {
         const vp = this.currentViewport();
         if (!vp) return;
         const viewportIndex = this.getViewportItemIndex(index);
@@ -1664,7 +1903,7 @@ export class UnitSearchComponent {
         // Check if the item is within the rendered range
         if (viewportIndex < renderedRange.start || viewportIndex >= renderedRange.end) {
             // Item is not rendered at all, need to scroll to it
-            vp.scrollToIndex(viewportIndex, 'smooth');
+            vp.scrollToIndex(viewportIndex, behavior);
             return;
         }
 
@@ -1674,7 +1913,7 @@ export class UnitSearchComponent {
 
         if (localIndex < 0 || localIndex >= items.length) {
             // Safety fallback
-            vp.scrollToIndex(viewportIndex, 'smooth');
+            vp.scrollToIndex(viewportIndex, behavior);
             return;
         }
 
@@ -1696,11 +1935,11 @@ export class UnitSearchComponent {
         if (isAbove) {
             // Item is above the visible area - scroll up by the exact amount needed
             const scrollAmount = vpRect.top - itemRect.top;
-            vp.scrollToOffset(currentOffset - scrollAmount, 'smooth');
+            vp.scrollToOffset(currentOffset - scrollAmount, behavior);
         } else {
             // Item is below the visible area - scroll down by the exact amount needed
             const scrollAmount = itemRect.bottom - vpRect.bottom;
-            vp.scrollToOffset(currentOffset + scrollAmount, 'smooth');
+            vp.scrollToOffset(currentOffset + scrollAmount, behavior);
         }
     }
 
@@ -1758,7 +1997,7 @@ export class UnitSearchComponent {
     }
 
     showUnitDetails(unit: Unit) {
-        const filteredUnits = this.filtersService.filteredUnits();
+        const filteredUnits = this.displayedUnits();
         const filteredUnitIndex = filteredUnits.findIndex(u => u.name === unit.name);
         const ref = this.dialogsService.createDialog(UnitDetailsDialogComponent, {
             data: <UnitDetailsDialogData>{
@@ -1772,13 +2011,7 @@ export class UnitSearchComponent {
 
         // Track navigation within the dialog to keep activeIndex in sync
         const indexChangeSub = ref.componentInstance?.indexChange.subscribe((newIndex: number) => {
-            this.activeIndex.set(newIndex);
-            this.scrollToMakeVisible(newIndex);
-            // Fetch fresh to avoid closure over stale filteredUnits
-            const currentFilteredUnits = this.filtersService.filteredUnits();
-            if (newIndex < currentFilteredUnits.length) {
-                this.inlinePanelUnit.set(currentFilteredUnits[newIndex]);
-            }
+            this.selectResultIndex(newIndex, this.displayedUnits(), 'auto');
         });
 
         const addSub = ref.componentInstance?.add.subscribe(() => {
@@ -1847,7 +2080,7 @@ export class UnitSearchComponent {
     }
 
     onUnitTableRowPointerEnter(event: DataTableRowPointerEnterEvent<Unit>): void {
-        this.activeIndex.set(event.index);
+        this.onResultPointerEnter(event.index);
     }
 
     isSortActive(...keysOrGroups: string[]): boolean {
@@ -1938,6 +2171,12 @@ export class UnitSearchComponent {
             return min === max ? fmtMin : `${fmtMin}–${fmtMax}`;
         }
 
+        if (isASDamageFilterKey(key)) {
+            const fmtMin = formatASDamageValue(min);
+            const fmtMax = formatASDamageValue(max);
+            return min === max ? fmtMin : `${fmtMin}–${fmtMax}`;
+        }
+
         const fmtMin = FormatNumberPipe.formatValue(min, true, false);
         const fmtMax = FormatNumberPipe.formatValue(max, true, false);
         return min === max ? fmtMin : `${fmtMin}–${fmtMax}`;
@@ -2002,6 +2241,10 @@ export class UnitSearchComponent {
 
         const raw = this.getUnitSortRawValue(unit, key);
         if (raw == null) return '—';
+
+        if (typeof raw === 'number' && isASDamageFilterKey(key)) {
+            return formatASDamageValue(raw);
+        }
 
         return typeof raw === 'number' ? FormatNumberPipe.formatValue(raw, true, false) : String(raw);
     }
@@ -2070,7 +2313,7 @@ export class UnitSearchComponent {
 
         // Determine which units to tag: selected units if any.
         const selectedNames = this.selectedUnits();
-        const allUnits = this.filtersService.filteredUnits();
+        const allUnits = this.displayedUnits();
         let unitsToTag: Unit[];
         if (selectedNames.size > 0) {
             // Always include the clicked unit, even if not in the selection
@@ -2174,7 +2417,7 @@ export class UnitSearchComponent {
         this.inlinePanelUnit.set(unit);
         if (this.showInlinePanel()) {
             // Update activeIndex to match clicked unit
-            const filteredUnits = this.filtersService.filteredUnits();
+            const filteredUnits = this.displayedUnits();
             const index = filteredUnits.findIndex(u => u.name === unit.name);
             if (index >= 0) {
                 this.activeIndex.set(index);
@@ -2202,22 +2445,16 @@ export class UnitSearchComponent {
     onInlinePanelPrev(): void {
         const index = this.inlinePanelIndex();
         if (index > 0) {
-            const prevUnit = this.filtersService.filteredUnits()[index - 1];
-            this.inlinePanelUnit.set(prevUnit);
-            this.activeIndex.set(index - 1);
-            this.scrollToMakeVisible(index - 1);
+            this.selectResultIndex(index - 1, this.displayedUnits(), 'auto');
         }
     }
 
     /** Navigate to next unit in inline panel */
     onInlinePanelNext(): void {
         const index = this.inlinePanelIndex();
-        const filteredUnits = this.filtersService.filteredUnits();
+        const filteredUnits = this.displayedUnits();
         if (index >= 0 && index < filteredUnits.length - 1) {
-            const nextUnit = filteredUnits[index + 1];
-            this.inlinePanelUnit.set(nextUnit);
-            this.activeIndex.set(index + 1);
-            this.scrollToMakeVisible(index + 1);
+            this.selectResultIndex(index + 1, filteredUnits, 'auto');
         }
     }
 
@@ -2232,7 +2469,7 @@ export class UnitSearchComponent {
     }
 
     selectAll() {
-        const allUnits = this.filtersService.filteredUnits();
+        const allUnits = this.displayedUnits();
         const allNames = new Set(allUnits.map(u => u.name));
         this.selectedUnits.set(allNames);
     }
@@ -2300,7 +2537,10 @@ export class UnitSearchComponent {
         return this.resultsDataTable()?.getViewport() ?? this.viewport();
     }
 
-    private normalizeViewMode(viewMode: 'list' | 'card' | 'chassis' | 'table'): 'list' | 'card' | 'chassis' | 'table' {
+    private normalizeViewMode(viewMode: UnitSearchViewMode): UnitSearchViewMode {
+        if (viewMode === 'chassis' && this.activeVariantGroupFilter()) {
+            return 'list';
+        }
         if (!this.gameService.isAlphaStrike() && viewMode === 'card') {
             return 'list';
         }
@@ -2310,10 +2550,38 @@ export class UnitSearchComponent {
         return viewMode;
     }
 
-    private setViewMode(viewMode: 'list' | 'card' | 'chassis' | 'table') {
+    private setViewMode(viewMode: UnitSearchViewMode) {
         const normalizedViewMode = this.normalizeViewMode(viewMode);
         this.viewMode.set(normalizedViewMode);
         void this.optionsService.setOption('unitSearchViewMode', normalizedViewMode);
+    }
+
+    toggleViewModeMenu(event: MouseEvent) {
+        event.stopPropagation();
+        this.viewModeMenuOpen.update(open => !open);
+    }
+
+    closeViewModeMenu() {
+        this.viewModeMenuOpen.set(false);
+    }
+
+    selectViewMode(viewMode: UnitSearchViewMode, event?: MouseEvent) {
+        event?.stopPropagation();
+        const option = this.viewModeOptions().find(item => item.mode === viewMode);
+        if (!option || option.disabled) return;
+
+        if (viewMode === 'chassis' && this.activeVariantGroupFilter()) {
+            this.clearVariantGroupFilter();
+            this.closeViewModeMenu();
+            return;
+        }
+
+        if (option.requiresExpanded && !this.expandedView()) {
+            this.expandedView.set(true);
+        }
+
+        this.setViewMode(viewMode);
+        this.closeViewModeMenu();
     }
 
     toggleExpandedView() {
@@ -2329,75 +2597,69 @@ export class UnitSearchComponent {
     }
 
     clearSearch() {
+        if (this.searchDebounceTimer) {
+            clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = undefined;
+        }
+        this.pendingSearchText = null;
+        this.searchCommitPending.set(false);
+        this.pendingResultOpenRequest.set(false);
         this.immediateSearchText.set('');
         this.filtersService.setSearchText('');
         this.activeIndex.set(null);
     }
 
-    /**
-     * Cycle through view modes.
-     * AS:  list → card → chassis → table → list
-        * CBT: list → chassis → table → list
-     */
-    cycleViewMode() {
-        const current = this.viewMode();
-        const isAS = this.gameService.isAlphaStrike();
-        const isExpanded = this.expandedView();
-        if (isAS) {
-            // Compact: list → card → chassis → list
-            // Expanded: list → card → chassis → table → list
-            if (!isExpanded) {
-                this.setViewMode(
-                    current === 'list'
-                        ? 'card'
-                        : current === 'card'
-                            ? 'chassis'
-                            : 'list'
-                );
-                return;
-            }
-
-            // list → card → chassis → table → list
-            this.setViewMode(
-                current === 'list'
-                    ? 'card'
-                    : current === 'card'
-                        ? 'chassis'
-                        : current === 'chassis'
-                            ? 'table'
-                            : 'list'
-            );
-        } else {
-            if (!isExpanded) {
-                this.setViewMode(current === 'list' ? 'chassis' : 'list');
-                return;
-            }
-
-            this.setViewMode(
-                current === 'list'
-                    ? 'chassis'
-                    : current === 'chassis'
-                        ? 'table'
-                        : 'list'
-            );
-        }
+    formatVariantGroupType(group: Pick<UnitVariantGroupIdentity, 'asType'>): string {
+        return AS_TYPE_DISPLAY_NAMES[group.asType] ?? group.asType;
     }
 
-    /**
-     * Handle click on a compact chassis group.
-     * Appends a chassis filter to the current search to drill down into variants.
-     */
+    formatVariantGroupTitle(group: UnitVariantGroupIdentity): string {
+        return group.chassis;
+    }
+
+    formatVariantGroupMeta(group: UnitVariantGroupIdentity, variantCount: number): string {
+        const omniSuffix = group.omni ? ' (omni)' : '';
+        return `${this.formatVariantGroupType(group)}${omniSuffix} · ${variantCount} variant${variantCount === 1 ? '' : 's'}`;
+    }
+
+    /** Handle click on a compact chassis group to drill down into its variants. */
     onCompactGroupClick(group: ChassisGroup) {
-        // Build a chassis= filter and set it as the search text
-        const chassisFilter = `chassis="${group.chassis}"`;
-        const typeFilter = group.type ? ` type="${group.type}"` : '';
-        const fullFilter = chassisFilter + typeFilter;
-        const current = this.filtersService.searchText().trim();
-        const newSearch = current ? `${current} ${fullFilter}` : fullFilter;
-        this.immediateSearchText.set(newSearch);
-        this.filtersService.setSearchText(newSearch);
-        // Switch back to list view to show variants
-        this.setViewMode('list');
+        this.activeVariantGroupFilter.set({
+            key: group.key,
+            chassis: group.chassis,
+            asType: group.asType,
+            omni: group.omni,
+            representativeUnit: group.representativeUnit,
+        });
+        this.activeIndex.set(null);
+        this.inlinePanelUnit.set(null);
+        this.viewMode.set('list');
+    }
+
+    clearVariantGroupFilter(): void {
+        const groupKey = this.activeVariantGroupFilter()?.key;
+        if (!groupKey) return;
+
+        this.activeVariantGroupFilter.set(null);
+        this.activeIndex.set(null);
+        this.inlinePanelUnit.set(null);
+        this.setViewMode('chassis');
+        this.scrollToVariantsGroup(groupKey);
+    }
+
+    private scrollToVariantsGroup(groupKey: string): void {
+        afterNextRender(() => {
+            const dropdown = this.resultsDropdown()?.nativeElement;
+            const rows = dropdown
+                ? Array.from(dropdown.querySelectorAll<HTMLElement>('.chassis-view-row'))
+                : [];
+            const row = rows.find(element => element.dataset['variantGroupKey'] === groupKey);
+            if (!row) return;
+
+            row.scrollIntoView({ block: 'center', behavior: 'instant' });
+            row.classList.add('restored');
+            window.setTimeout(() => row.classList.remove('restored'), 900);
+        }, { injector: this.injector });
     }
 
     openShareSearch(event: MouseEvent) {

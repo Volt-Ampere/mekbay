@@ -17,6 +17,7 @@ import type {
     RemoteLoadForceUnit,
 } from './remote-load-force-entry.model';
 import type { Unit } from './units.model';
+import { generateUUID } from '../services/ws.service';
 
 export interface ForcePreviewUnit {
     unit: Unit | undefined;
@@ -45,6 +46,8 @@ export interface ForcePreviewEntry {
     local: boolean;
     missing: boolean;
     name: string;
+    note?: string;
+    tags?: string[];
     faction: Faction | null;
     era: Era | null;
     bv?: number;
@@ -60,6 +63,15 @@ function assignForcePreviewUnitField<K extends keyof ForcePreviewUnit>(
     if (value !== undefined) {
         target[key] = value;
     }
+}
+
+function resolveSerializedUnitId(id: string | undefined): string {
+    const normalizedId = id?.trim();
+    if (normalizedId && Number(normalizedId) > 0) {
+        return normalizedId;
+    }
+
+    return generateUUID();
 }
 
 function isASSerializedUnit(unit: SerializedUnit): unit is ASSerializedUnit {
@@ -113,6 +125,8 @@ function createForcePreviewEntryData(data: Partial<ForcePreviewEntry>): ForcePre
         local: data.local ?? false,
         missing: data.missing ?? false,
         name: data.name ?? '',
+        note: data.note || undefined,
+        tags: data.tags?.length ? [...data.tags] : undefined,
         faction: data.faction ?? null,
         era: data.era ?? null,
         bv: data.bv,
@@ -140,6 +154,7 @@ export function createForcePreviewUnit(
     const previewUnit: ForcePreviewUnit = {
         unit: getUnitByName(raw.unit),
         destroyed: raw.state?.destroyed ?? false,
+        lockKey: generateUUID(),
     };
 
     assignForcePreviewUnitField(previewUnit, 'alias', raw.alias);
@@ -158,7 +173,7 @@ export function createForcePreviewUnitFromSerializedUnit(
     const previewUnit: ForcePreviewUnit = {
         unit: getUnitByName(unit.unit),
         destroyed: unit.state?.destroyed ?? false,
-        lockKey: unit.id,
+        lockKey: resolveSerializedUnitId(unit.id),
     };
 
     assignForcePreviewUnitField(previewUnit, 'alias', unit.alias);
@@ -189,7 +204,7 @@ export function createForcePreviewUnitFromForceUnit(
     const previewUnit: ForcePreviewUnit = {
         unit: forceUnit.getUnit(),
         destroyed: forceUnit.destroyed,
-        lockKey: forceUnit.id,
+        lockKey: resolveSerializedUnitId(forceUnit.id),
     };
 
     assignForcePreviewUnitField(previewUnit, 'alias', forceUnit.alias());
@@ -225,6 +240,8 @@ export function createForcePreviewEntry(
         owned: raw.owned ?? true,
         instanceId: raw.instanceId,
         name: raw.name,
+        note: raw.note || undefined,
+        tags: raw.tags?.length ? [...raw.tags] : undefined,
         type: raw.type ?? GameSystem.CLASSIC,
         faction: raw.factionId != null ? resolver.getFactionById(raw.factionId) ?? null : null,
         era: raw.eraId != null ? resolver.getEraById(raw.eraId) ?? null : null,
@@ -246,6 +263,8 @@ export function createForcePreviewEntryFromSerializedForce(
         owned: raw.owned ?? true,
         instanceId: raw.instanceId,
         name: raw.name,
+        note: raw.note || undefined,
+        tags: raw.tags?.length ? [...raw.tags] : undefined,
         type: raw.type ?? GameSystem.CLASSIC,
         faction: raw.factionId != null ? resolver.getFactionById(raw.factionId) ?? null : null,
         era: raw.eraId != null ? resolver.getEraById(raw.eraId) ?? null : null,
@@ -264,6 +283,7 @@ export function createForcePreviewEntryFromForce(
     force: Force,
     options: { cloud?: boolean; local?: boolean } = {},
 ): ForcePreviewEntry {
+    const tags = force.tags ?? [];
     const groups = force.groups()
         .filter((group) => group.units().length > 0)
         .map((group) => ({
@@ -278,6 +298,8 @@ export function createForcePreviewEntryFromForce(
         owned: force.owned(),
         instanceId: force.instanceId() ?? '',
         name: force.name,
+        note: force.note || undefined,
+        tags: tags.length ? [...tags] : undefined,
         type: force.gameSystem,
         faction: force.faction(),
         era: force.era(),

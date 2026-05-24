@@ -39,7 +39,7 @@ export const MEGAMEK_AVAILABILITY_UNKNOWN_SCORE = -1;
 export const MEGAMEK_AVAILABILITY_UNKNOWN = 'Unknown' as const;
 export const MEGAMEK_AVAILABILITY_NOT_AVAILABLE = 'Not Available' as const;
 
-export const MEGAMEK_AVAILABILITY_FROM_OPTIONS = ['Production', 'Salvage'] as const;
+export const MEGAMEK_AVAILABILITY_FROM_OPTIONS = ['Requisition', 'Salvage'] as const;
 export type MegaMekAvailabilityFrom = typeof MEGAMEK_AVAILABILITY_FROM_OPTIONS[number];
 export const MEGAMEK_AVAILABILITY_FROM_FILTER_OPTIONS = [
     ...MEGAMEK_AVAILABILITY_FROM_OPTIONS,
@@ -83,8 +83,8 @@ export const MEGAMEK_AVAILABILITY_BADGE_COLORS: Record<MegaMekAvailabilityRarity
     'Very Common': MEGAMEK_AVAILABILITY_RARITY_ICON_COLORS['Very Common'],
 };
 
-const MEGAMEK_AVAILABILITY_MIN_RARITY_SCORE = 1;
-const MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS = [2.8, 4.6, 6.4, 8.2] as const;
+const MEGAMEK_AVAILABILITY_NOT_AVAILABLE_SCORE = 0;
+const MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS = [20, 40, 60, 80] as const;
 
 export type MegaMekWeightedEraAvailability = Record<string, MegaMekWeightedAvailabilityValue>;
 
@@ -102,7 +102,7 @@ export function getMegaMekAvailabilityValueForSource(
     value: MegaMekWeightedAvailabilityValue,
     availabilityFrom: MegaMekAvailabilityFrom,
 ): number {
-    return availabilityFrom === 'Production'
+    return availabilityFrom === 'Requisition'
         ? value[0] ?? 0
         : value[1] ?? 0;
 }
@@ -118,19 +118,19 @@ export function isMegaMekAvailabilityValueAvailable(value: MegaMekWeightedAvaila
 export function getMegaMekAvailabilityRarityForScore(
     score: number,
 ): Exclude<MegaMekAvailabilityRarity, typeof MEGAMEK_AVAILABILITY_UNKNOWN> {
-    if (score < MEGAMEK_AVAILABILITY_MIN_RARITY_SCORE) {
+    if (score <= MEGAMEK_AVAILABILITY_NOT_AVAILABLE_SCORE) {
         return MEGAMEK_AVAILABILITY_NOT_AVAILABLE;
     }
-    if (score <= MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[0]) {
+    if (score < MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[0]) {
         return 'Very Rare';
     }
-    if (score <= MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[1]) {
+    if (score < MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[1]) {
         return 'Rare';
     }
-    if (score <= MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[2]) {
+    if (score < MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[2]) {
         return 'Uncommon';
     }
-    if (score <= MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[3]) {
+    if (score < MEGAMEK_AVAILABILITY_RARITY_THRESHOLDS[3]) {
         return 'Common';
     }
 

@@ -37,7 +37,7 @@ import type { DataService } from '../services/data.service';
 import type { Unit } from "./units.model";
 import type { UnitInitializerService } from '../services/unit-initializer.service';
 import { generateUUID } from '../services/ws.service';
-import { type SerializedForce, type SerializedUnit, type SerializedGroup, type SerializedC3NetworkGroup, C3_NETWORK_GROUP_SCHEMA } from './force-serialization';
+import { type SerializedForce, type SerializedUnit, type SerializedGroup, type SerializedC3NetworkGroup, C3_NETWORK_GROUP_SCHEMA, FORCE_NOTE_MAX_LENGTH, sanitizeForceTags } from './force-serialization';
 import type { ForceUnit } from './force-unit.model';
 import { GameSystem } from './common.model';
 import { C3NetworkUtil } from '../utils/c3-network.util';
@@ -45,7 +45,7 @@ import { Sanitizer } from '../utils/sanitizer.util';
 import { LoggerService } from '../services/logger.service';
 import { type Faction } from './factions.model';
 import type { Era } from './eras.model';
-import { type FormationTypeDefinition, type FormationMatch, formationNameMatchesGroupName, isNoFormation } from '../utils/formation-type.model';
+import { type FormationTypeDefinition, type FormationMatch, formationNameMatchesGroupName, isNoFormation, NO_FORMATION } from '../utils/formation-type.model';
 import { LanceTypeIdentifierUtil } from '../utils/lance-type-identifier.util';
 import { FormationNamerUtil } from '../utils/formation-namer.util';
 import type { OrgSizeResult } from '../utils/org/org-types';
@@ -72,6 +72,18 @@ function hasFactionEraAvailability(
     return availabilityContext.getFactionEraUnitIds(faction, era).size > 0;
 }
 
+function resolveSerializedFormation(
+    formationId: string | undefined,
+    formationLock: boolean | undefined,
+    gameSystem: GameSystem,
+): FormationTypeDefinition | null {
+    if (formationId) {
+        return LanceTypeIdentifierUtil.getDefinitionById(formationId, gameSystem);
+    }
+
+    return formationLock ? NO_FORMATION : null;
+}
+
 export interface EraUnitValidationSummary {
     totalUnits: number;
     validUnits: number;
@@ -85,6 +97,53 @@ export interface EraUnitValidationSummary {
 
 function formatEraWarningUnits(unitNames: readonly string[]): string {
     return unitNames.map(unitName => `"${unitName}"`).join(', ');
+}
+
+export function buildEraWarningMessage(
+    units: readonly ForceUnit[],
+    era: Era | null,
+    faction: Faction | null,
+    eras: readonly Era[],
+    extinctFaction: Faction | null,
+    availabilityContext: ForceAvailabilityContext = createMulForceAvailabilityContext(),
+    factionExistsInEra: (faction: Faction, era: Era) => boolean = (candidateFaction, candidateEra) => (
+        hasFactionEraAvailability(candidateFaction, candidateEra, availabilityContext)
+    ),
+): string | null {
+    if (!era) {
+        return null;
+    }
+
+    const warnings: string[] = [];
+    const {
+        invalidTrackedUnits,
+        invalidTrackedUnitNames,
+        extinctTrackedUnits,
+        extinctTrackedUnitNames,
+        invalidYearFallbackUnits,
+        invalidYearFallbackUnitNames,
+    } = getEraUnitValidationSummary(units, era, eras, extinctFaction, availabilityContext);
+
+    if (faction && !factionExistsInEra(faction, era)) {
+        warnings.push(`${faction.name} does not exist in this era.`);
+    }
+
+    if (invalidTrackedUnits > 0) {
+        const unitLabel = invalidTrackedUnits === 1 ? 'unit is' : 'units are';
+        warnings.push(`${invalidTrackedUnits} ${unitLabel} not listed in the ${era.name} era: ${formatEraWarningUnits(invalidTrackedUnitNames)}.`);
+    }
+
+    if (extinctTrackedUnits > 0) {
+        const unitLabel = extinctTrackedUnits === 1 ? 'unit is' : 'units are';
+        warnings.push(`${extinctTrackedUnits} ${unitLabel} extinct in the ${era.name} era: ${formatEraWarningUnits(extinctTrackedUnitNames)}.`);
+    }
+
+    if (invalidYearFallbackUnits > 0) {
+        const unitLabel = invalidYearFallbackUnits === 1 ? 'unit is' : 'units are';
+        warnings.push(`${invalidYearFallbackUnits} ${unitLabel} newer than this era ends in ${era.years.to}: ${formatEraWarningUnits(invalidYearFallbackUnitNames)}.`);
+    }
+
+    return warnings.length > 0 ? warnings.join(' ') : null;
 }
 
 export function getEraUnitValidationSummary(
@@ -306,12 +365,18 @@ export class UnitGroup<TUnit extends ForceUnit = ForceUnit> {
     formationRequirementsFilterNotice = computed<string | null>(() => {
         return this._formationMatch()?.requirementsFilterNotice ?? null;
     });
+
+    formationRequirementsFilterCompositionName = computed<string | null>(() => {
+        return this._formationMatch()?.requirementsFilterCompositionName ?? null;
+    });
 }
 
 export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
     gameSystem: GameSystem = GameSystem.CLASSIC;
     instanceId: WritableSignal<string | null> = signal(null);
     _name: WritableSignal<string>;
+    _note: WritableSignal<string>;
+    _tags: WritableSignal<string[]>;
     timestamp: string | null = null;
     groups: WritableSignal<UnitGroup<TUnit>[]> = signal([]);
     _c3Networks: WritableSignal<SerializedC3NetworkGroup[]> = signal([]); // C3 network configurations
@@ -336,6 +401,8 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
         unitInitializer: UnitInitializerService,
         injector: Injector) {
         this._name = signal(name);
+        this._note = signal('');
+        this._tags = signal([]);
         this.dataService = dataService;
         this.unitInitializer = unitInitializer;
         this.injector = injector;
@@ -358,6 +425,14 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
         return this._name();
     }
 
+    get note(): string {
+        return this._note();
+    }
+
+    get tags(): string[] {
+        return this._tags();
+    }
+
     displayName = computed<string>(() => {
         const name = this.name;
         if (!name) {
@@ -368,6 +443,22 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
 
     public setName(name: string, emitChange: boolean = true) {
         this._name.set(name);
+        if (this.instanceId() || emitChange) {
+            this.emitChanged();
+        }
+    }
+
+    public setNote(note: string | null | undefined, emitChange: boolean = true) {
+        const nextNote = (note ?? '').slice(0, FORCE_NOTE_MAX_LENGTH);
+        this._note.set(nextNote);
+        if (this.instanceId() || emitChange) {
+            this.emitChanged();
+        }
+    }
+
+    public setTags(tags: readonly string[] | null | undefined, emitChange: boolean = true) {
+        const nextTags = sanitizeForceTags(tags);
+        this._tags.set(nextTags);
         if (this.instanceId() || emitChange) {
             this.emitChanged();
         }
@@ -417,42 +508,16 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
         faction: Faction | null,
         availabilityContext: ForceAvailabilityContext = createMulForceAvailabilityContext(),
     ): string | null {
-        if (!era) {
-            return null;
-        }
-
-        const warnings: string[] = [];
         const eras = this.dataService.getEras();
         const extinctFaction = this.dataService.getFactionById(MULFACTION_EXTINCT) ?? null;
-        const {
-            invalidTrackedUnits,
-            invalidTrackedUnitNames,
-            extinctTrackedUnits,
-            extinctTrackedUnitNames,
-            invalidYearFallbackUnits,
-            invalidYearFallbackUnitNames,
-        } = getEraUnitValidationSummary(this.units(), era, eras, extinctFaction, availabilityContext);
-
-        if (faction && !hasFactionEraAvailability(faction, era, availabilityContext)) {
-            warnings.push(`${faction.name} does not exist in this era.`);
-        }
-
-        if (invalidTrackedUnits > 0) {
-            const unitLabel = invalidTrackedUnits === 1 ? 'unit is' : 'units are';
-            warnings.push(`${invalidTrackedUnits} ${unitLabel} not listed in the ${era.name} era: ${formatEraWarningUnits(invalidTrackedUnitNames)}.`);
-        }
-
-        if (extinctTrackedUnits > 0) {
-            const unitLabel = extinctTrackedUnits === 1 ? 'unit is' : 'units are';
-            warnings.push(`${extinctTrackedUnits} ${unitLabel} extinct in the ${era.name} era: ${formatEraWarningUnits(extinctTrackedUnitNames)}.`);
-        }
-
-        if (invalidYearFallbackUnits > 0) {
-            const unitLabel = invalidYearFallbackUnits === 1 ? 'unit is' : 'units are';
-            warnings.push(`${invalidYearFallbackUnits} ${unitLabel} newer than this era ends in ${era.years.to}: ${formatEraWarningUnits(invalidYearFallbackUnitNames)}.`);
-        }
-
-        return warnings.length > 0 ? warnings.join(' ') : null;
+        return buildEraWarningMessage(
+            this.units(),
+            era,
+            faction,
+            eras,
+            extinctFaction,
+            availabilityContext,
+        );
     }
 
     public addUnit(unit: Unit, targetGroup?: UnitGroup<TUnit>): TUnit {
@@ -740,6 +805,8 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
             instanceId: instanceId,
             type: this.gameSystem,
             name: this.name,
+            note: this.note || undefined,
+            tags: this.tags.length > 0 ? [...this.tags] : undefined,
             factionId: this.faction()?.id,
             factionLock: this.factionLock || undefined,
             eraId: this.era()?.id,
@@ -821,6 +888,8 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
         try {
             this.instanceId.set(sanitizedData.instanceId);
             this.owned.set(sanitizedData.owned !== false);
+            this.setNote(sanitizedData.note ?? '', false);
+            this.setTags(sanitizedData.tags ?? [], false);
 
             // Resolve faction from factionId
             this.factionLock = sanitizedData.factionLock || false;
@@ -858,13 +927,8 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
                     group.setName(undefined, false);
                 }
                 group.color = g.color || '';
-                if (g.formationId) {
-                    group.formation.set(LanceTypeIdentifierUtil.getDefinitionById(g.formationId, this.gameSystem));
-                    group.formationLock = g.formationLock || undefined;
-                } else {
-                    group.formation.set(null);
-                    group.formationLock = undefined;
-                }
+                group.formationLock = g.formationLock || undefined;
+                group.formation.set(resolveSerializedFormation(g.formationId, group.formationLock, this.gameSystem));
                 group.units.set(groupUnits);
                 parsedGroups.push(group);
             }
@@ -891,6 +955,8 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
         this.loading = true;
         try {
             if (this.name !== sanitizedData.name) this.setName(sanitizedData.name, false);
+            if (this.note !== (sanitizedData.note ?? '')) this.setNote(sanitizedData.note ?? '', false);
+            if (!this.areTagsEqual(this.tags, sanitizedData.tags ?? [])) this.setTags(sanitizedData.tags ?? [], false);
             this.timestamp = sanitizedData.timestamp ?? null;
 
             // Resolve faction from factionId
@@ -938,10 +1004,8 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
                         }
                     }
                     group.color = groupData.color;
-                    group.formation.set(groupData.formationId
-                        ? LanceTypeIdentifierUtil.getDefinitionById(groupData.formationId, this.gameSystem)
-                        : null);
                     group.formationLock = groupData.formationLock || undefined;
+                    group.formation.set(resolveSerializedFormation(groupData.formationId, group.formationLock, this.gameSystem));
                     if (!group.formationLock && groupData.formationId) {
                         group.formationHistory.add(groupData.formationId);
                     }
@@ -953,15 +1017,10 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
                     }
                     group.id = groupData.id;
                     group.color = groupData.color;
-                    if (groupData.formationId) {
-                        group.formation.set(LanceTypeIdentifierUtil.getDefinitionById(groupData.formationId, this.gameSystem));
-                        group.formationLock = groupData.formationLock || undefined;
-                        if (!group.formationLock) {
-                            group.formationHistory.add(groupData.formationId);
-                        }
-                    } else {
-                        group.formation.set(null);
-                        group.formationLock = undefined;
+                    group.formationLock = groupData.formationLock || undefined;
+                    group.formation.set(resolveSerializedFormation(groupData.formationId, group.formationLock, this.gameSystem));
+                    if (groupData.formationId && !group.formationLock) {
+                        group.formationHistory.add(groupData.formationId);
                     }
                 }
 
@@ -999,6 +1058,14 @@ export abstract class Force<TUnit extends ForceUnit = ForceUnit> {
         } finally {
             this.loading = false;
         }
+    }
+
+    private areTagsEqual(currentTags: readonly string[], nextTags: readonly string[]): boolean {
+        if (currentTags.length !== nextTags.length) {
+            return false;
+        }
+
+        return currentTags.every((tag, index) => tag === nextTags[index]);
     }
 
     /**

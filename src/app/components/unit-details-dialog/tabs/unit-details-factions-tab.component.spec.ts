@@ -7,8 +7,11 @@ import type { MegaMekWeightedAvailabilityRecord } from '../../../models/megamek/
 import { MULFACTION_EXTINCT } from '../../../models/mulfactions.model';
 import type { Unit } from '../../../models/units.model';
 import { DataService } from '../../../services/data.service';
+import { createEmptyUnit } from '../../../testing/unit-test-helpers';
 import { UnitAvailabilitySourceService } from '../../../services/unit-availability-source.service';
 import { UnitDetailsFactionTabComponent } from './unit-details-factions-tab.component';
+
+const TEST_ICON_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
 
 describe('UnitDetailsFactionTabComponent', () => {
     const eras: Era[] = [
@@ -58,13 +61,13 @@ describe('UnitDetailsFactionTabComponent', () => {
             },
         } as Faction,
     ];
-    const unit = {
+    const unit = createEmptyUnit({
         id: 1,
         name: 'Atlas',
         chassis: 'Atlas',
         model: 'AS7-D',
         type: 'Mek',
-    } as Unit;
+    });
 
     let megaMekAvailabilityRecord: MegaMekWeightedAvailabilityRecord | undefined;
     let useMegaMekAvailability = false;
@@ -85,7 +88,7 @@ describe('UnitDetailsFactionTabComponent', () => {
             n: unit.name,
             e: {
                 '3050': {
-                    '7': [7, 3],
+                    '7': [70, 30],
                 },
             },
         };
@@ -114,6 +117,7 @@ describe('UnitDetailsFactionTabComponent', () => {
         fixture.detectChanges();
 
         const element = fixture.nativeElement as HTMLElement;
+        const disclaimer = element.querySelector('.availability-source-disclaimer');
         const factionItems = Array.from(element.querySelectorAll('.faction-item'));
         const availabilityBadges = Array.from(element.querySelectorAll('.faction-megamek-availability-badge'));
         const badgeLabels = availabilityBadges.map((badge) => badge.getAttribute('aria-label'));
@@ -121,13 +125,14 @@ describe('UnitDetailsFactionTabComponent', () => {
         const mercenariesItem = factionItems.find((item) => item.textContent?.includes('Mercenaries'));
         const extinctItem = factionItems.find((item) => item.textContent?.includes('Extinct'));
 
+        expect(disclaimer).toBeNull();
         expect(factionItems.length).toBe(2);
         expect(draconisCombineItem).toBeTruthy();
         expect(mercenariesItem).toBeUndefined();
         expect(extinctItem).toBeTruthy();
         expect(draconisCombineItem?.querySelectorAll('.faction-megamek-availability-badge').length).toBe(2);
         expect(extinctItem?.querySelectorAll('.faction-megamek-availability-badge').length).toBe(0);
-        expect(badgeLabels).toEqual(['Production: Common', 'Salvage: Rare']);
+        expect(badgeLabels).toEqual(['Requisition: Common', 'Salvage: Rare']);
         expect(dataServiceMock.getMegaMekAvailabilityRecordForUnit).toHaveBeenCalledWith(unit);
         expect(unitAvailabilitySourceMock.useMegaMekAvailability).toHaveBeenCalled();
         expect(unitAvailabilitySourceMock.getFactionEraUnitIds).not.toHaveBeenCalled();
@@ -142,7 +147,7 @@ describe('UnitDetailsFactionTabComponent', () => {
                 isHeader: true,
             },
             {
-                label: 'Production',
+                label: 'Requisition',
                 value: 'Common',
             },
             {
@@ -153,6 +158,66 @@ describe('UnitDetailsFactionTabComponent', () => {
         expect(viewModel[0].factions.find((faction) => faction.name === 'Extinct')?.megaMekTooltip).toBeNull();
     });
 
+    it('splits multiword faction labels into head, middle, and tail wrap groups', () => {
+        const originalFactionCount = factions.length;
+        factions.push(
+            {
+                id: 77,
+                name: 'Clan Sea Fox',
+                group: 'Clan',
+                img: TEST_ICON_SRC,
+                eras: {
+                    3050: new Set([1]),
+                },
+            } as unknown as Faction,
+            {
+                id: 99,
+                name: 'Inner Sphere General',
+                group: 'Inner Sphere',
+                img: TEST_ICON_SRC,
+                eras: {
+                    3050: new Set([1]),
+                },
+            } as unknown as Faction,
+        );
+        megaMekAvailabilityRecord = {
+            n: unit.name,
+            e: {
+                '3050': {
+                    '7': [7, 3],
+                    '77': [6, 0],
+                    '99': [5, 0],
+                },
+            },
+        };
+
+        try {
+            const fixture = TestBed.createComponent(UnitDetailsFactionTabComponent);
+            fixture.componentRef.setInput('unit', unit);
+            fixture.detectChanges();
+
+            const element = fixture.nativeElement as HTMLElement;
+            const clanSeaFoxItem = Array.from(element.querySelectorAll('.faction-item'))
+                .find((item) => item.textContent?.includes('Clan Sea Fox'));
+            const catchAllLabel = Array.from(element.querySelectorAll('.parent-faction'))
+                .find((item) => item.textContent?.includes('Inner Sphere General'));
+
+            expect(clanSeaFoxItem).toBeTruthy();
+            expect(clanSeaFoxItem?.querySelector('.faction-name-head')?.textContent?.trim()).toBe('Clan');
+            expect(clanSeaFoxItem?.querySelector('.faction-name-middle')?.textContent).toBe(' Sea ');
+            expect(clanSeaFoxItem?.querySelector('.faction-name-tail')?.textContent?.trim().startsWith('Fox')).toBeTrue();
+            expect(clanSeaFoxItem?.querySelector('.faction-name-head .faction-icon')).toBeTruthy();
+
+            expect(catchAllLabel).toBeTruthy();
+            expect(catchAllLabel?.querySelector('.faction-name-head')?.textContent?.trim()).toBe('Inner');
+            expect(catchAllLabel?.querySelector('.faction-name-middle')?.textContent).toBe(' Sphere ');
+            expect(catchAllLabel?.querySelector('.faction-name-tail')?.textContent?.trim().startsWith('General')).toBeTrue();
+            expect(catchAllLabel?.querySelector('.faction-name-head .faction-icon')).toBeTruthy();
+        } finally {
+            factions.length = originalFactionCount;
+        }
+    });
+
     it('renders MegaMek factions directly from the unit record and adds extinct eras', () => {
         useMegaMekAvailability = true;
 
@@ -160,8 +225,11 @@ describe('UnitDetailsFactionTabComponent', () => {
         fixture.componentRef.setInput('unit', unit);
         fixture.detectChanges();
 
+        const element = fixture.nativeElement as HTMLElement;
+        const disclaimer = element.querySelector('.availability-source-disclaimer');
         const viewModel = fixture.componentInstance.factionAvailability();
 
+        expect(disclaimer?.textContent?.trim()).toBe("Availability source: MegaMek's RAT.");
         expect(viewModel.map((era) => era.eraName)).toEqual(['Clan Invasion', 'ilClan']);
         expect(viewModel[0].factions.map((faction) => faction.name)).toEqual(['Draconis Combine']);
         expect(viewModel[1].factions.map((faction) => faction.name)).toEqual(['Extinct']);
@@ -173,7 +241,7 @@ describe('UnitDetailsFactionTabComponent', () => {
                 isHeader: true,
             },
             {
-                label: 'Production',
+                label: 'Requisition',
                 value: 'Common',
             },
             {

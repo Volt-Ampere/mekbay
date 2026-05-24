@@ -42,23 +42,45 @@ import { MAX_UNITS as FORCE_MAX_UNITS } from '../../models/force.model';
 import { createForcePreviewEntryFromForce, getForcePreviewUnitEntries, type ForcePreviewEntry, type ForcePreviewUnit } from '../../models/force-preview.model';
 import type { LoadForceEntry } from '../../models/load-force-entry.model';
 import type { AvailabilitySource } from '../../models/options.model';
-import { DROPDOWN_FILTERS, RANGE_FILTERS } from '../../services/unit-search-filters.model';
+import type { Unit } from '../../models/units.model';
+import { BOOLEAN_FILTERS, DROPDOWN_FILTERS, RANGE_FILTERS } from '../../services/unit-search-filters.model';
 import { BaseDialogComponent } from '../base-dialog/base-dialog.component';
 import { ForcePreviewPanelComponent } from '../force-preview-panel/force-preview-panel.component';
 import { ForceRadarPanelComponent } from '../force-radar-panel/force-radar-panel.component';
-import { MultiSelectDropdownComponent, type MultiStateSelection } from '../multi-select-dropdown/multi-select-dropdown.component';
+import { ModeSwitchComponent } from '../mode-switch/mode-switch.component';
+import { MultiSelectDropdownComponent, type DropdownOption, type MultiStateSelection } from '../multi-select-dropdown/multi-select-dropdown.component';
+import { RangeSliderComponent } from '../range-slider/range-slider.component';
 import { TooltipDirective } from '../../directives/tooltip.directive';
 import { UnitSearchAdvancedFiltersComponent } from '../unit-search-advanced-filters/unit-search-advanced-filters.component';
 import { DataService } from '../../services/data.service';
 import { ForceBuilderService } from '../../services/force-builder.service';
-import { ForceGeneratorService, type ForceGenerationPreview, type GeneratedForceUnit } from '../../services/force-generator.service';
+import {
+    DEFAULT_FORCE_GENERATION_MAX_CBT_SKILL_DELTA,
+    FORCE_GENERATION_MAX_PILOT_SKILL,
+    FORCE_GENERATION_MIN_PILOT_SKILL,
+    ForceGeneratorService,
+    type ForceGenerationPreview,
+    type ForceGenerationPreviewTask,
+    type ForceGenerationRequest,
+    type ForceGenerationSkillRange,
+    type ForceGenerationSkillRanges,
+    type ForceGenerationTargetFormationSelection,
+    type GeneratedForceUnit,
+} from '../../services/force-generator.service';
 import { GameService } from '../../services/game.service';
 import { OptionsService } from '../../services/options.service';
-import { WsService } from '../../services/ws.service';
+import { generateUUID, WsService } from '../../services/ws.service';
 import type { AdvFilterOptions, DropdownFilterOptions } from '../../services/unit-search-filters.model';
 import { UnitSearchFiltersService } from '../../services/unit-search-filters.service';
 import { resolveDropdownNamesFromFilter } from '../../utils/filter-name-resolution.util';
+import { getFormationDefinitions } from '../../utils/formation-blueprints';
+import { FormationRequirementEngine } from '../../utils/formation-requirement-engine.util';
+import { getFormationDropdownDisplayName, type FormationTypeDefinition } from '../../utils/formation-type.model';
+import { LanceTypeIdentifierUtil } from '../../utils/lance-type-identifier.util';
+import { type HighlightToken, tokenizeForHighlight } from '../../utils/semantic-filter-ast.util';
+import { isFilterAvailableForAvailabilitySource } from '../../utils/unit-search-filter-config.util';
 import { normalizeMultiStateSelection } from '../../utils/unit-search-shared.util';
+import { SyntaxInputComponent } from '../syntax-input/syntax-input.component';
 
 export interface SearchForceGeneratorDialogConfig {
     gameSystem: GameSystem;
@@ -69,8 +91,15 @@ export interface SearchForceGeneratorDialogConfig {
     };
     minUnitCount: number;
     maxUnitCount: number;
+    skillRanges: ForceGenerationSkillRanges;
     crossEraAvailabilityInMultiEraSelection: boolean;
+    randomFaction: boolean;
+    mergeSelectedFactionAvailability: boolean;
     preventDuplicateChassis: boolean;
+    useTaggedQuantities: boolean;
+    useUnitTagsAsChassisTags: boolean;
+    targetFormationId?: string;
+    targetFormations?: readonly ForceGenerationTargetFormationSelection[];
 }
 
 export interface SearchForceGeneratorDialogResult {
@@ -82,6 +111,14 @@ export interface SearchForceGeneratorDialogResult {
 type MultiStateFilterKey = 'era' | 'faction' | '_tags';
 type UnitTypeFilterKey = 'type' | 'as.TP';
 type GeneratorDialogTab = 'configuration' | 'preview';
+type FormationTargetDropdownFilterKey = 'era' | 'faction';
+const RANDOM_FACTION_OPTION_NAME = '__force-generator-random-faction__';
+type FormationTargetDropdownOptionsProvider = UnitSearchFiltersService & {
+    getDropdownOptionsForFormationTarget?: (
+        filterKey: FormationTargetDropdownFilterKey,
+        definition: FormationTypeDefinition | null,
+    ) => DropdownOption[] | null;
+};
 
 @Component({
     selector: 'search-force-generator-dialog',
@@ -92,7 +129,10 @@ type GeneratorDialogTab = 'configuration' | 'preview';
         BaseDialogComponent,
         ForcePreviewPanelComponent,
         ForceRadarPanelComponent,
+        ModeSwitchComponent,
         MultiSelectDropdownComponent,
+        RangeSliderComponent,
+        SyntaxInputComponent,
         TooltipDirective,
         UnitSearchAdvancedFiltersComponent,
     ],
@@ -111,15 +151,21 @@ export class SearchForceGeneratorDialogComponent {
     private readonly optionsService = inject(OptionsService);
     private readonly wsService = inject(WsService);
     readonly filtersService = inject(UnitSearchFiltersService);
+    private activeForceGenerationTask: ForceGenerationPreviewTask | null = null;
+    private activeForceGenerationRunId = 0;
+    private readonly initialOptions = this.optionsService.options();
     private readonly initialGameSystem = this.gameService.currentGameSystem();
     private readonly selectedGameSystem = signal<GameSystem>(this.initialGameSystem);
     private readonly initialBudgetDefaults = this.forceGeneratorService.resolveInitialBudgetDefaults(
-        this.optionsService.options(),
+        this.initialOptions,
         0,
         this.initialGameSystem,
     );
     private readonly initialUnitCountDefaults = this.forceGeneratorService.resolveInitialUnitCountDefaults(
-        this.optionsService.options(),
+        this.initialOptions,
+    );
+    private readonly initialSkillDefaults = this.forceGeneratorService.resolveInitialSkillDefaults(
+        this.initialOptions,
     );
 
     readonly gameSystem = this.selectedGameSystem.asReadonly();
@@ -128,6 +174,32 @@ export class SearchForceGeneratorDialogComponent {
     readonly eligibleUnits = this.filtersService.forceGeneratorEligibleUnits;
     readonly pilotGunnerySkill = computed(() => this.filtersService.pilotGunnerySkill());
     readonly pilotPilotingSkill = computed(() => this.filtersService.pilotPilotingSkill());
+    readonly minPilotSkill = FORCE_GENERATION_MIN_PILOT_SKILL;
+    readonly maxPilotSkill = FORCE_GENERATION_MAX_PILOT_SKILL;
+    readonly pilotSkillAvailableRange: [number, number] = [FORCE_GENERATION_MIN_PILOT_SKILL, FORCE_GENERATION_MAX_PILOT_SKILL];
+    readonly gunnerySkillRange = signal<[number, number]>([
+        this.initialSkillDefaults.gunnery.min,
+        this.initialSkillDefaults.gunnery.max,
+    ]);
+    readonly pilotingSkillRange = signal<[number, number]>([
+        this.initialSkillDefaults.piloting.min,
+        this.initialSkillDefaults.piloting.max,
+    ]);
+    readonly maxPilotSkillDelta = signal(this.initialSkillDefaults.maxDelta);
+    readonly forceGenerationSkillRanges = computed<ForceGenerationSkillRanges>(() => ({
+        gunnery: this.toSkillRangeObject(this.gunnerySkillRange()),
+        piloting: this.toSkillRangeObject(this.pilotingSkillRange()),
+        maxDelta: this.maxPilotSkillDelta(),
+    }));
+    readonly gunnerySkillRangeActive = computed(() => {
+        const range = this.gunnerySkillRange();
+        return range[0] !== 4 || range[1] !== 4;
+    });
+    readonly pilotingSkillRangeActive = computed(() => {
+        const range = this.pilotingSkillRange();
+        return range[0] !== 5 || range[1] !== 5;
+    });
+    readonly maxPilotSkillDeltaActive = computed(() => this.maxPilotSkillDelta() !== DEFAULT_FORCE_GENERATION_MAX_CBT_SKILL_DELTA);
     readonly eraFilter = computed(() => this.getDropdownFilter('era'));
     readonly factionFilter = computed(() => this.getDropdownFilter('faction'));
     readonly unitTypeFilterKey = computed<UnitTypeFilterKey | null>(() => this.resolveUnitTypeFilterKey());
@@ -135,15 +207,42 @@ export class SearchForceGeneratorDialogComponent {
         const filterKey = this.unitTypeFilterKey();
         return filterKey ? this.getDropdownFilter(filterKey) : null;
     });
-    readonly subtypeFilter = computed(() => this.getDropdownFilter('subtype'));
+    readonly subtypeFilter = computed(() => this.gameSystem() === GameSystem.CLASSIC ? this.getDropdownFilter('subtype') : null);
     readonly tagsFilter = computed(() => this.getDropdownFilter('_tags'));
+    readonly targetFormationEraOptions = computed(() => this.getDropdownOptionsForTargetFormation('era', this.eraFilter()));
+    readonly randomFactionOption: DropdownOption = {
+        name: RANDOM_FACTION_OPTION_NAME,
+        displayName: 'Random',
+        img: '/images/random.svg',
+        alwaysVisible: true,
+        exclusive: true,
+        stateCycle: ['or'],
+    };
+    readonly targetFormationFactionOptions = computed(() => [
+        this.randomFactionOption,
+        ...this.getDropdownOptionsForTargetFormation('faction', this.factionFilter()),
+    ]);
     readonly selectedEraValues = computed(() => this.getSelectedMultiStateValues(this.eraFilter()));
-    readonly selectedFactionValues = computed(() => this.getSelectedMultiStateValues(this.factionFilter()));
+    readonly selectedFactionValues = computed<MultiStateSelection>(() => this.randomFactionSelected()
+        ? {
+            [RANDOM_FACTION_OPTION_NAME]: {
+                name: RANDOM_FACTION_OPTION_NAME,
+                state: 'or' as const,
+                count: 1,
+            },
+        }
+        : this.getSelectedMultiStateValues(this.factionFilter()));
     readonly selectedUnitTypeValues = computed(() => this.getSelectedDropdownValues(this.unitTypeFilter()));
     readonly selectedSubtypeValues = computed(() => this.getSelectedDropdownValues(this.subtypeFilter()));
     readonly selectedTagValues = computed(() => this.getSelectedMultiStateValues(this.tagsFilter()));
     readonly crossEraAvailabilityInMultiEraSelection = signal(false);
+    readonly randomFactionSelected = signal(false);
+    readonly mergeSelectedFactionAvailability = signal(true);
     readonly positiveEraSelectionCount = computed(() => this.countPositiveMultiStateSelections(this.eraFilter()));
+    readonly positiveFactionSelectionCount = computed(() => this.countPositiveMultiStateSelections(this.factionFilter()));
+    readonly selectedFactionAvailabilityMergeToggleVisible = computed(() => (
+        !this.randomFactionSelected() && this.positiveFactionSelectionCount() > 1
+    ));
     readonly crossEraAvailabilityToggleEnabled = computed(() => {
         const positiveEraSelectionCount = this.positiveEraSelectionCount();
         return positiveEraSelectionCount === 0 || positiveEraSelectionCount > 1;
@@ -154,9 +253,21 @@ export class SearchForceGeneratorDialogComponent {
             ? baseMessage
             : `${baseMessage} Available only when no positive era is selected or when multiple eras are selected.`;
     });
+    readonly mergeSelectedFactionAvailabilityTooltip = computed(() => (
+        'When enabled, availability uses max P/S across selected factions. When disabled, generation rolls one selected faction and uses only that faction\'s weights.'
+    ));
     readonly advPanelFilterGameSystem = signal<GameSystem>(this.initialGameSystem);
+    readonly pilotSkillsOpen = signal(false);
     readonly additionalFiltersOpen = signal(false);
-    readonly additionalFiltersExcludedKeys = computed(() => {
+    readonly pilotSkillsHasActiveSettings = computed(() => {
+        if (this.gunnerySkillRangeActive()) {
+            return true;
+        }
+
+        return this.gameSystem() === GameSystem.CLASSIC
+            && (this.pilotingSkillRangeActive() || this.maxPilotSkillDeltaActive());
+    });
+    private readonly primaryDialogFilterKeys = computed(() => {
         const excludedKeys = new Set<string>(['era', 'faction', '_tags']);
         const unitTypeFilterKey = this.unitTypeFilterKey();
         if (unitTypeFilterKey) {
@@ -168,18 +279,100 @@ export class SearchForceGeneratorDialogComponent {
 
         return [...excludedKeys];
     });
+    readonly additionalFiltersExcludedKeys = computed(() => this.primaryDialogFilterKeys());
     readonly otherAdvPanelFilterGameSystem = computed(() => this.getOtherGameSystem(this.advPanelFilterGameSystem()));
     readonly otherAdvPanelFilterGameSystemHasActiveFilters = computed(() => {
         const filterState = this.filtersService.effectiveFilterState();
         const otherGameSystem = this.otherAdvPanelFilterGameSystem();
+        const excludedKeys = new Set(this.primaryDialogFilterKeys());
+        const availabilitySource = this.optionsService.options().availabilitySource;
 
-        return [...DROPDOWN_FILTERS, ...RANGE_FILTERS].some((filter) => (
-            filter.game === otherGameSystem && filterState[filter.key]?.interactedWith
+        return [...BOOLEAN_FILTERS, ...DROPDOWN_FILTERS, ...RANGE_FILTERS].some((filter) => (
+            filter.game === otherGameSystem
+            && !excludedKeys.has(filter.key)
+            && isFilterAvailableForAvailabilitySource(filter, availabilitySource)
+            && filterState[filter.key]?.interactedWith
         ));
+    });
+    readonly additionalFiltersHasActiveSettings = computed(() => {
+        const hasSearchText = this.filtersService.searchText().trim().length > 0;
+        const filterState = this.filtersService.effectiveFilterState();
+        const excludedKeys = new Set(this.primaryDialogFilterKeys());
+        const availabilitySource = this.optionsService.options().availabilitySource;
+        const hasActiveAdvancedFilters = [...BOOLEAN_FILTERS, ...DROPDOWN_FILTERS, ...RANGE_FILTERS].some((filter) => (
+            !excludedKeys.has(filter.key)
+            && isFilterAvailableForAvailabilitySource(filter, availabilitySource)
+            && filterState[filter.key]?.interactedWith
+        ));
+
+        return hasSearchText || hasActiveAdvancedFilters;
+    });
+    readonly searchHighlightTokens = computed((): HighlightToken[] => {
+        const text = this.filtersService.searchText();
+        return text.length > 0
+            ? tokenizeForHighlight(text, this.gameSystem())
+            : [];
     });
     readonly currentForce = this.forceBuilderService.smartCurrentForce;
     readonly canImportCurrentForce = computed(() => (this.currentForce()?.units().length ?? 0) > 0);
-    readonly preventDuplicateChassis = signal(false);
+    readonly targetFormationSelection = signal<MultiStateSelection>({});
+    readonly targetFormationStateCycle = ['or'] as const;
+    readonly targetFormationOptions = computed<DropdownOption[]>(() => {
+        const definitions = getFormationDefinitions()
+            .filter((definition) => FormationRequirementEngine.hasBlueprint(definition.id))
+            .filter((definition) => LanceTypeIdentifierUtil.getDefinitionById(definition.id, this.gameSystem()) !== null)
+            .filter((definition) => this.isTargetFormationAvailableForSelectedFactions(definition));
+
+        return definitions
+            .map((definition) => ({
+                name: definition.id,
+                displayName: getFormationDropdownDisplayName(definition),
+            }))
+            .sort((left, right) => (
+                (left.displayName ?? left.name).localeCompare(right.displayName ?? right.name)
+                || left.name.localeCompare(right.name)
+            ));
+    });
+    readonly targetFormations = computed<ForceGenerationTargetFormationSelection[]>(() => {
+        const availableFormationIds = new Set(this.targetFormationOptions().map((option) => option.name));
+        return Object.values(this.targetFormationSelection())
+            .filter((selection) => selection.state === 'or' && availableFormationIds.has(selection.name))
+            .map((selection) => ({
+                formationId: selection.name,
+                count: Math.max(1, Math.floor(selection.count || 1)),
+            }));
+    });
+    readonly targetFormationId = computed(() => {
+        const targetFormations = this.targetFormations();
+        return targetFormations.length === 1 && targetFormations[0].count === 1
+            ? targetFormations[0].formationId
+            : '';
+    });
+    readonly targetFormationAvailabilityDefinition = computed<FormationTypeDefinition | null>(() => {
+        for (const targetFormation of this.targetFormations()) {
+            const definition = LanceTypeIdentifierUtil.getDefinitionById(targetFormation.formationId, this.gameSystem());
+            if (definition?.exclusiveFaction?.length) {
+                return definition;
+            }
+        }
+
+        return null;
+    });
+    readonly targetFormationSummary = computed(() => this.formatTargetFormationSummary(this.targetFormations()));
+    readonly preventDuplicateChassis = signal(this.initialOptions.forceGenPreventDuplicateChassis);
+    readonly useTaggedQuantities = signal(
+        this.initialOptions.forceGenUseTaggedQuantities && !this.initialOptions.forceGenPreventDuplicateChassis,
+    );
+    readonly useUnitTagsAsChassisTags = signal(this.initialOptions.forceGenUseUnitTagsAsChassisTags);
+    readonly preventDuplicateChassisTooltip = computed(() => (
+        'Blocks additional copies that share the same chassis and type as an already selected unit. Useful when you want one variant per chassis pair.'
+    ));
+    readonly useTaggedQuantitiesTooltip = computed(() => (
+        'Uses selected tag quantities as copy limits during force generation. Unit-variant tags stay exact-unit by default; chassis tags already apply to all variants of the same chassis/type.'
+    ));
+    readonly useUnitTagsAsChassisTagsTooltip = computed(() => (
+        'Unit-variant tag quantities are grouped by chassis and type instead of by exact unit. Variants sharing that chassis share one pool, and if a chassis tag and a unit-variant tag pool both apply, the larger cap wins.'
+    ));
     private readonly lockedUnits = signal<GeneratedForceUnit[]>([]);
     readonly lockedUnitKeys = computed(() => {
         return new Set(
@@ -190,6 +383,9 @@ export class SearchForceGeneratorDialogComponent {
     });
     readonly previewLockToggle = (unitEntry: ForcePreviewUnit): void => {
         this.togglePreviewUnitLock(unitEntry);
+    };
+    readonly previewVariantChange = (unitEntry: ForcePreviewUnit, variant: Unit): void => {
+        this.changePreviewUnitVariant(unitEntry, variant);
     };
     readonly hoveredPreviewUnit = signal<ForcePreviewUnit | null>(null);
     readonly selectedPreviewUnit = signal<ForcePreviewUnit | null>(null);
@@ -206,9 +402,14 @@ export class SearchForceGeneratorDialogComponent {
             lines.push(`Filters: ${filterSummary}`);
         }
 
+        const targetFormationSummary = this.targetFormationSummary();
+        if (targetFormationSummary) {
+            lines.push(`Target Formations: ${targetFormationSummary}`);
+        }
+
         const skillLabel = this.gameSystem() === GameSystem.ALPHA_STRIKE
-            ? `Pilot Skill ${this.pilotGunnerySkill()}`
-            : `Gunnery ${this.pilotGunnerySkill()} Piloting ${this.pilotPilotingSkill()}`;
+            ? `Pilot Skill ${this.formatSkillRange(this.gunnerySkillRange())}`
+            : `Gunnery ${this.formatSkillRange(this.gunnerySkillRange())} Piloting ${this.formatSkillRange(this.pilotingSkillRange())} Delta ${this.maxPilotSkillDelta()}`;
         lines.push(`${skillLabel}`);
 
         // if (this.lockedUnits().length > 0) {
@@ -238,23 +439,29 @@ export class SearchForceGeneratorDialogComponent {
     readonly collapsedHowPicksWhereChosen = signal(false);
     readonly previewDisplaySettings = computed(() => ({
         gameSystem: this.gameSystem(),
-        gunnery: this.pilotGunnerySkill(),
-        piloting: this.pilotPilotingSkill(),
+        gunnery: this.gunnerySkillRange()[0],
+        piloting: this.pilotingSkillRange()[0],
     }));
     readonly generationSettings = computed(() => {
         const gameSystem = this.gameSystem();
+        const skillRanges = this.forceGenerationSkillRanges();
         return {
             gameSystem,
             budgetRange: gameSystem === GameSystem.ALPHA_STRIKE
                 ? { min: this.alphaStrikeBudgetMin(), max: this.alphaStrikeBudgetMax() }
                 : { min: this.classicBudgetMin(), max: this.classicBudgetMax() },
-            gunnery: this.pilotGunnerySkill(),
-            piloting: this.pilotPilotingSkill(),
+            gunnery: skillRanges.gunnery.min,
+            piloting: skillRanges.piloting?.min ?? this.pilotingSkillRange()[0],
+            skillRanges,
             minUnitCount: this.minUnitCount(),
             maxUnitCount: this.maxUnitCount(),
+            targetFormationId: this.targetFormationId() || undefined,
+            targetFormations: this.targetFormations(),
         };
     });
     readonly mobileTab = signal<GeneratorDialogTab>('configuration');
+    readonly forceGenerationInProgress = signal(false);
+    readonly forceGenerationTerminateRequested = signal(false);
     private readonly previewState = signal<ForceGenerationPreview>(this.createEmptyPreview(
         'Press REROLL to generate a force preview for the current settings.',
     ));
@@ -276,7 +483,8 @@ export class SearchForceGeneratorDialogComponent {
     });
     readonly previewEntry = computed<ForcePreviewEntry | null>(() => {
         const preview = this.preview();
-        return this.forceGeneratorService.createForcePreviewEntry(preview);
+        const entry = this.forceGeneratorService.createForcePreviewEntry(preview);
+        return entry;
     });
 
     constructor() {
@@ -290,6 +498,23 @@ export class SearchForceGeneratorDialogComponent {
                 untracked(() => this.crossEraAvailabilityInMultiEraSelection.set(false));
             }
         });
+
+        effect(() => {
+            const availableFormationIds = new Set(this.targetFormationOptions().map((option) => option.name));
+            const currentSelection = this.targetFormationSelection();
+            const nextSelection: MultiStateSelection = {};
+            for (const [formationId, selection] of Object.entries(currentSelection)) {
+                if (availableFormationIds.has(formationId) && (selection.state === 'or' || selection.state === 'and')) {
+                    nextSelection[formationId] = {
+                        ...selection,
+                        state: selection.state === 'and' ? 'or' : selection.state,
+                    };
+                }
+            }
+            if (JSON.stringify(nextSelection) !== JSON.stringify(currentSelection)) {
+                untracked(() => this.targetFormationSelection.set(nextSelection));
+            }
+        });
     }
 
     budgetMinimumFieldLabel(): string {
@@ -301,23 +526,47 @@ export class SearchForceGeneratorDialogComponent {
     }
 
     setPilotSkill(type: 'gunnery' | 'piloting', value: number): void {
+        const normalizedValue = this.normalizeSkillValue(value, type === 'gunnery' ? this.gunnerySkillRange()[0] : this.pilotingSkillRange()[0]);
         const currentGunnery = this.filtersService.pilotGunnerySkill();
         const currentPiloting = this.filtersService.pilotPilotingSkill();
         if (type === 'gunnery') {
-            this.filtersService.setPilotSkills(value, currentPiloting);
+            this.setSkillRange('gunnery', [normalizedValue, normalizedValue]);
+            this.filtersService.setPilotSkills(normalizedValue, currentPiloting);
         } else {
-            this.filtersService.setPilotSkills(currentGunnery, value);
+            this.setSkillRange('piloting', [normalizedValue, normalizedValue]);
+            this.filtersService.setPilotSkills(currentGunnery, normalizedValue);
         }
     }
 
-    openSelect(event: Event, select: HTMLSelectElement): void {
-        event.preventDefault();
-        event.stopPropagation();
-        select.showPicker?.() ?? select.focus();
+    onGunnerySkillRangeChange(range: [number, number]): void {
+        this.setSkillRange('gunnery', range);
+    }
+
+    onPilotingSkillRangeChange(range: [number, number]): void {
+        this.setSkillRange('piloting', range);
+    }
+
+    onMaxPilotSkillDeltaChange(event: Event): void {
+        this.setMaxPilotSkillDelta(this.normalizeMaxPilotSkillDelta(
+            this.parseNumericValue(event, this.maxPilotSkillDelta()),
+        ));
+    }
+
+    onMaxPilotSkillDeltaBlur(event: Event): void {
+        this.onMaxPilotSkillDeltaChange(event);
+        this.syncInputValue(event, this.maxPilotSkillDelta());
+    }
+
+    formatSkillRange(range: readonly [number, number]): string {
+        return range[0] === range[1] ? `${range[0]}` : `${range[0]}-${range[1]}`;
     }
 
     toggleAdditionalFilters(): void {
         this.additionalFiltersOpen.update((value) => !value);
+    }
+
+    togglePilotSkills(): void {
+        this.pilotSkillsOpen.update((value) => !value);
     }
 
     setAdvPanelFilterGameSystem(gameSystem: GameSystem): void {
@@ -351,7 +600,17 @@ export class SearchForceGeneratorDialogComponent {
     }
 
     onFactionSelectionChange(selection: MultiStateSelection | readonly string[]): void {
-        this.setMultiStateFilter('faction', selection);
+        const normalizedSelection = normalizeMultiStateSelection(selection);
+        const randomSelection = normalizedSelection[RANDOM_FACTION_OPTION_NAME];
+        if (randomSelection?.state !== undefined && randomSelection.state !== false) {
+            this.randomFactionSelected.set(true);
+            this.filtersService.setFilter('faction', {});
+            return;
+        }
+
+        delete normalizedSelection[RANDOM_FACTION_OPTION_NAME];
+        this.randomFactionSelected.set(false);
+        this.setMultiStateFilter('faction', normalizedSelection);
     }
 
     onUnitTypeSelectionChange(selection: MultiStateSelection | readonly string[]): void {
@@ -371,8 +630,46 @@ export class SearchForceGeneratorDialogComponent {
         this.setMultiStateFilter('_tags', selection);
     }
 
+    onSearchTextChange(value: string): void {
+        this.filtersService.setSearchText(value);
+    }
+
+    clearSearchText(): void {
+        this.filtersService.setSearchText('');
+    }
+
     onPreventDuplicateChassisChange(event: Event): void {
-        this.preventDuplicateChassis.set((event.target as HTMLInputElement).checked);
+        const checked = (event.target as HTMLInputElement).checked;
+        if (this.preventDuplicateChassis() !== checked) {
+            this.preventDuplicateChassis.set(checked);
+            void this.optionsService.setOption('forceGenPreventDuplicateChassis', checked);
+        }
+
+        if (checked && this.useTaggedQuantities()) {
+            this.useTaggedQuantities.set(false);
+            void this.optionsService.setOption('forceGenUseTaggedQuantities', false);
+        }
+    }
+
+    onUseTaggedQuantitiesChange(event: Event): void {
+        const checked = (event.target as HTMLInputElement).checked;
+        if (this.useTaggedQuantities() !== checked) {
+            this.useTaggedQuantities.set(checked);
+            void this.optionsService.setOption('forceGenUseTaggedQuantities', checked);
+        }
+
+        if (checked && this.preventDuplicateChassis()) {
+            this.preventDuplicateChassis.set(false);
+            void this.optionsService.setOption('forceGenPreventDuplicateChassis', false);
+        }
+    }
+
+    onUseUnitTagsAsChassisTagsChange(event: Event): void {
+        const checked = (event.target as HTMLInputElement).checked;
+        if (this.useUnitTagsAsChassisTags() !== checked) {
+            this.useUnitTagsAsChassisTags.set(checked);
+            void this.optionsService.setOption('forceGenUseUnitTagsAsChassisTags', checked);
+        }
     }
 
     onCrossEraAvailabilityInMultiEraSelectionChange(event: Event): void {
@@ -382,12 +679,34 @@ export class SearchForceGeneratorDialogComponent {
         );
     }
 
+    onMergeSelectedFactionAvailabilityChange(event: Event): void {
+        this.mergeSelectedFactionAvailability.set((event.target as HTMLInputElement).checked);
+    }
+
+    onTargetFormationSelectionChange(selection: MultiStateSelection | readonly string[]): void {
+        const availableFormationIds = new Set(this.targetFormationOptions().map((option) => option.name));
+        const normalizedSelection = normalizeMultiStateSelection(selection);
+        const nextSelection: MultiStateSelection = {};
+
+        for (const [formationId, targetSelection] of Object.entries(normalizedSelection)) {
+            if ((targetSelection.state === 'or' || targetSelection.state === 'and') && availableFormationIds.has(formationId)) {
+                nextSelection[formationId] = {
+                    name: formationId,
+                    state: 'or',
+                    count: Math.max(1, Math.floor(targetSelection.count || 1)),
+                };
+            }
+        }
+
+        this.targetFormationSelection.set(nextSelection);
+    }
+
     onBudgetMinChange(event: Event): void {
         this.setBudgetRangeForSystem(
             this.gameSystem(),
             this.forceGeneratorService.resolveBudgetRangeForEditedMin(
                 this.budgetRange(),
-                this.parseNumericValue(event, this.budgetRange().min),
+                this.parseNumericValue(event, 0),
             ),
         );
     }
@@ -433,12 +752,55 @@ export class SearchForceGeneratorDialogComponent {
     }
 
     reroll(): void {
+        this.cancelActiveForceGeneration();
         this.clearHoveredPreviewUnit();
         this.clearSelectedPreviewUnit();
-        const preview = this.buildGeneratedPreview();
-        this.previewState.set(preview);
         this.mobileTab.set('preview');
-        this.recordForceGeneration(preview);
+
+        const request = this.buildForceGenerationRequest();
+        const buildPreviewAsync = (this.forceGeneratorService as Partial<Pick<ForceGeneratorService, 'buildPreviewAsync'>>)
+            .buildPreviewAsync?.bind(this.forceGeneratorService);
+        if (!buildPreviewAsync) {
+            this.completeGeneratedPreview(this.forceGeneratorService.buildPreview(request));
+            return;
+        }
+
+        const task = buildPreviewAsync(request);
+        if (!task.isAsync) {
+            void task.result.then((preview) => this.completeGeneratedPreview(preview));
+            return;
+        }
+
+        const runId = this.activeForceGenerationRunId + 1;
+        this.activeForceGenerationRunId = runId;
+        this.activeForceGenerationTask = task;
+        this.forceGenerationTerminateRequested.set(false);
+        this.forceGenerationInProgress.set(true);
+
+        void task.result
+            .then((preview) => {
+                if (!this.isActiveForceGenerationTask(task, runId)) {
+                    return;
+                }
+
+                this.completeGeneratedPreview(preview);
+            })
+            .catch(() => {
+                if (!this.isActiveForceGenerationTask(task, runId)) {
+                    return;
+                }
+
+                this.previewState.set(this.createEmptyPreview('Unable to generate a force preview.'));
+            })
+            .finally(() => {
+                if (!this.isActiveForceGenerationTask(task, runId)) {
+                    return;
+                }
+
+                this.activeForceGenerationTask = null;
+                this.forceGenerationInProgress.set(false);
+                this.forceGenerationTerminateRequested.set(false);
+            });
     }
 
     importCurrentForce(): void {
@@ -447,18 +809,20 @@ export class SearchForceGeneratorDialogComponent {
             return;
         }
 
+        this.cancelActiveForceGeneration();
         this.clearHoveredPreviewUnit();
         this.clearSelectedPreviewUnit();
 
         const importedPreviewEntry = createForcePreviewEntryFromForce(currentForce);
         const importedUnits = getForcePreviewUnitEntries(importedPreviewEntry)
-            .map((unitEntry, index) => this.toLockedGeneratedUnit(unitEntry, index))
+            .map((unitEntry) => this.toLockedGeneratedUnit(unitEntry))
             .filter((unit): unit is GeneratedForceUnit => unit !== null);
 
         this.lockedUnits.set(importedUnits);
         this.previewState.set(this.createPreviewFromUnits(importedUnits, {
             faction: importedPreviewEntry.faction,
             era: importedPreviewEntry.era,
+            name: importedPreviewEntry.name,
             explanationLines: ['Imported current force into preview. Press REROLL to generate a new result for the current settings.'],
             error: importedUnits.length === 0 ? 'No units from the current force could be loaded into the preview.' : null,
         }));
@@ -477,12 +841,13 @@ export class SearchForceGeneratorDialogComponent {
     }
 
     submit(): void {
-        if (!this.previewEntry() || this.previewError()) {
+        const previewEntry = this.previewEntry();
+        if (this.forceGenerationInProgress() || !previewEntry || this.previewError()) {
             return;
         }
 
         const preview = this.preview();
-        const forceEntry = this.forceGeneratorService.createForceEntry(preview);
+        const forceEntry = this.forceGeneratorService.createForceEntryFromPreviewEntry(previewEntry);
         if (!forceEntry) {
             return;
         }
@@ -496,15 +861,32 @@ export class SearchForceGeneratorDialogComponent {
                 budgetRange: this.budgetRange(),
                 minUnitCount: this.minUnitCount(),
                 maxUnitCount: this.maxUnitCount(),
+                skillRanges: this.forceGenerationSkillRanges(),
                 crossEraAvailabilityInMultiEraSelection: this.crossEraAvailabilityInMultiEraSelection(),
+                randomFaction: this.randomFactionSelected(),
+                mergeSelectedFactionAvailability: this.mergeSelectedFactionAvailability(),
                 preventDuplicateChassis: this.preventDuplicateChassis(),
+                useTaggedQuantities: this.useTaggedQuantities(),
+                useUnitTagsAsChassisTags: this.useTaggedQuantities() && this.useUnitTagsAsChassisTags(),
+                targetFormationId: this.targetFormationId() || undefined,
+                targetFormations: this.targetFormations(),
             },
             totalCost: preview.totalCost,
         });
     }
 
     dismiss(): void {
+        this.cancelActiveForceGeneration();
         this.dialogRef.close(null);
+    }
+
+    terminateForceGeneration(): void {
+        if (!this.activeForceGenerationTask) {
+            return;
+        }
+
+        this.forceGenerationTerminateRequested.set(true);
+        this.activeForceGenerationTask.terminate();
     }
 
     private clearHoveredPreviewUnit(): void {
@@ -513,6 +895,27 @@ export class SearchForceGeneratorDialogComponent {
 
     private clearSelectedPreviewUnit(): void {
         this.selectedPreviewUnit.set(null);
+    }
+
+    private completeGeneratedPreview(preview: ForceGenerationPreview): void {
+        this.previewState.set(preview);
+        this.recordForceGeneration(preview);
+    }
+
+    private cancelActiveForceGeneration(): void {
+        if (!this.activeForceGenerationTask && !this.forceGenerationInProgress()) {
+            return;
+        }
+
+        this.activeForceGenerationTask?.terminate();
+        this.activeForceGenerationTask = null;
+        this.activeForceGenerationRunId += 1;
+        this.forceGenerationInProgress.set(false);
+        this.forceGenerationTerminateRequested.set(false);
+    }
+
+    private isActiveForceGenerationTask(task: ForceGenerationPreviewTask, runId: number): boolean {
+        return this.activeForceGenerationTask === task && this.activeForceGenerationRunId === runId;
     }
 
     private getDropdownFilter(key: string): DropdownFilterOptions | null {
@@ -528,6 +931,91 @@ export class SearchForceGeneratorDialogComponent {
         return Array.isArray(option?.value) ? [...option.value] : [];
     }
 
+    private getDropdownOptionsForTargetFormation(
+        filterKey: FormationTargetDropdownFilterKey,
+        option: DropdownFilterOptions | null,
+    ): DropdownOption[] {
+        const baseOptions = option?.options ?? [];
+        const definition = this.targetFormationAvailabilityDefinition();
+        if (!definition) {
+            return baseOptions;
+        }
+
+        const projectedOptions = (this.filtersService as FormationTargetDropdownOptionsProvider)
+            .getDropdownOptionsForFormationTarget?.(filterKey, definition);
+        if (projectedOptions) {
+            return projectedOptions;
+        }
+
+        return filterKey === 'faction'
+            ? this.getFallbackFactionOptionsForTargetFormation(baseOptions, definition)
+            : baseOptions;
+    }
+
+    private getFallbackFactionOptionsForTargetFormation(
+        options: readonly DropdownOption[],
+        definition: FormationTypeDefinition,
+    ): DropdownOption[] {
+        return options.map((option) => ({
+            ...option,
+            available: option.available !== false && LanceTypeIdentifierUtil.isFormationAvailableForFaction(
+                definition,
+                this.dataService.getFactionByName(option.name) ?? option.name,
+            ),
+        }));
+    }
+
+    private formatTargetFormationSummary(targetFormations: readonly ForceGenerationTargetFormationSelection[]): string {
+        if (targetFormations.length === 0) {
+            return '';
+        }
+
+        const displayNameByFormationId = new Map(this.targetFormationOptions().map((option) => [
+            option.name,
+            option.displayName ?? option.name,
+        ]));
+
+        return targetFormations
+            .map((targetFormation) => {
+                const displayName = displayNameByFormationId.get(targetFormation.formationId);
+                if (!displayName) {
+                    return '';
+                }
+                return targetFormation.count > 1
+                    ? `${targetFormation.count} ${displayName}`
+                    : displayName;
+            })
+            .filter((entry) => entry.length > 0)
+            .join(', ');
+    }
+
+    private isTargetFormationAvailableForSelectedFactions(definition: FormationTypeDefinition): boolean {
+        if (this.randomFactionSelected()) {
+            return true;
+        }
+
+        const factionFilter = this.factionFilter();
+        if (!factionFilter) {
+            return true;
+        }
+
+        const resolvedFactionNames = resolveDropdownNamesFromFilter(
+            this.selectedFactionValues(),
+            factionFilter.options.map((entry) => entry.name),
+        );
+        const positiveFactionNames = [...new Set([...resolvedFactionNames.or, ...resolvedFactionNames.and])];
+        if (positiveFactionNames.length === 0) {
+            return true;
+        }
+
+        return positiveFactionNames.some((factionName) => (
+            LanceTypeIdentifierUtil.isFormationAvailableForFaction(
+                definition,
+                this.dataService.getFactionByName(factionName) ?? factionName,
+            )
+        ));
+    }
+
     private countPositiveMultiStateSelections(option: DropdownFilterOptions | null): number {
         if (!option) {
             return 0;
@@ -541,7 +1029,7 @@ export class SearchForceGeneratorDialogComponent {
         return new Set([...resolvedNames.or, ...resolvedNames.and]).size;
     }
 
-    private buildGeneratedPreview(): ForceGenerationPreview {
+    private buildForceGenerationRequest(): ForceGenerationRequest {
         const settings = this.generationSettings();
         const eligibleUnits = this.eligibleUnits();
         const lockedUnits = this.resolvePreviewUnits(
@@ -551,10 +1039,16 @@ export class SearchForceGeneratorDialogComponent {
             settings.piloting,
         );
 
-        return this.forceGeneratorService.buildPreview({
+        return {
             eligibleUnits,
+            searchSettings: this.buildSearchSettingsExplanationLines(),
             context: this.forceGeneratorService.resolveGenerationContext(eligibleUnits, {
                 crossEraAvailabilityInMultiEraSelection: this.crossEraAvailabilityInMultiEraSelection(),
+                randomFaction: this.randomFactionSelected(),
+                mergeSelectedFactionAvailability: this.mergeSelectedFactionAvailability(),
+                gameSystem: settings.gameSystem,
+                targetFormationId: settings.targetFormationId,
+                targetFormations: settings.targetFormations,
             }),
             gameSystem: settings.gameSystem,
             budgetRange: settings.budgetRange,
@@ -562,9 +1056,14 @@ export class SearchForceGeneratorDialogComponent {
             maxUnitCount: settings.maxUnitCount,
             gunnery: settings.gunnery,
             piloting: settings.piloting,
+            skillRanges: settings.skillRanges,
             lockedUnits,
             preventDuplicateChassis: this.preventDuplicateChassis(),
-        });
+            useTaggedQuantities: this.useTaggedQuantities(),
+            useUnitTagsAsChassisTags: this.useTaggedQuantities() && this.useUnitTagsAsChassisTags(),
+            targetFormationId: settings.targetFormationId,
+            targetFormations: settings.targetFormations,
+        };
     }
 
     private recordForceGeneration(preview: ForceGenerationPreview): void {
@@ -578,12 +1077,15 @@ export class SearchForceGeneratorDialogComponent {
     private createEmptyPreview(error: string | null = null): ForceGenerationPreview {
         return {
             gameSystem: this.gameSystem(),
+            name: undefined,
             units: [],
             totalCost: 0,
             error,
             faction: null,
             era: null,
             explanationLines: [],
+            targetFormationId: this.targetFormationId() || undefined,
+            targetFormations: this.targetFormations(),
         };
     }
 
@@ -599,12 +1101,16 @@ export class SearchForceGeneratorDialogComponent {
 
         return {
             gameSystem: settings.gameSystem,
+            name: storedPreview.name,
             units,
             totalCost,
             error: storedPreview.error,
             faction: storedPreview.faction,
             era: storedPreview.era,
             explanationLines: storedPreview.explanationLines,
+            targetFormationId: storedPreview.targetFormationId,
+            targetFormations: storedPreview.targetFormations,
+            targetFormationGroups: storedPreview.targetFormationGroups,
         };
     }
 
@@ -615,6 +1121,7 @@ export class SearchForceGeneratorDialogComponent {
             era?: Era | null;
             explanationLines?: readonly string[];
             error?: string | null;
+            name?: string;
         } = {},
     ): ForceGenerationPreview {
         const settings = this.previewDisplaySettings();
@@ -627,12 +1134,15 @@ export class SearchForceGeneratorDialogComponent {
 
         return {
             gameSystem: settings.gameSystem,
+            name: options.name,
             units: resolvedUnits,
             totalCost: resolvedUnits.reduce((sum, unit) => sum + unit.cost, 0),
             error: options.error ?? null,
             faction: options.faction ?? null,
             era: options.era ?? null,
             explanationLines: [...(options.explanationLines ?? [])],
+            targetFormationId: this.targetFormationId() || undefined,
+            targetFormations: this.targetFormations(),
         };
     }
 
@@ -722,13 +1232,8 @@ export class SearchForceGeneratorDialogComponent {
     }
 
     private resolveUnitTypeFilterKey(): UnitTypeFilterKey | null {
-        if (this.getDropdownFilter('type')) {
-            return 'type';
-        }
-        if (this.getDropdownFilter('as.TP')) {
-            return 'as.TP';
-        }
-        return null;
+        const filterKey = this.gameSystem() === GameSystem.ALPHA_STRIKE ? 'as.TP' : 'type';
+        return this.getDropdownFilter(filterKey) ? filterKey : null;
     }
 
     private getOtherGameSystem(gameSystem: GameSystem): GameSystem {
@@ -753,27 +1258,52 @@ export class SearchForceGeneratorDialogComponent {
         this.filtersService.setFilter(key, selectedValues);
     }
 
-    private summarizeActiveFilters(): string {
+    private buildSearchSettingsExplanationLines(): string[] {
+        const searchText = this.filtersService.searchText().trim();
+        const filterSummary = this.summarizeActiveFilters(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+        const filterSettingsSummary = filterSummary.length > 0 ? filterSummary : 'none';
+        const settings = [
+            searchText.length > 0 ? `query "${searchText}"` : null,
+            `filters ${filterSettingsSummary}`,
+            this.formatFactionGenerationModeSummary(),
+        ].filter((setting): setting is string => setting !== null);
+
+        return [`Search settings: ${settings.join('; ')}.`];
+    }
+
+    private summarizeActiveFilters(maxVisibleFilters = 4, maxVisibleSelections = 2): string {
         const summaries = Object.values(this.filtersService.advOptions())
             .filter((option) => option.interacted)
-            .map((option) => this.formatFilterSummary(option))
+            .map((option) => this.formatFilterSummary(option, maxVisibleSelections))
             .filter((summary): summary is string => summary.length > 0);
 
         if (summaries.length === 0) {
             return '';
         }
 
-        const visibleSummaries = summaries.slice(0, 4);
+        if (!Number.isFinite(maxVisibleFilters)) {
+            return summaries.join(' | ');
+        }
+
+        const visibleSummaries = summaries.slice(0, maxVisibleFilters);
         const hiddenCount = summaries.length - visibleSummaries.length;
         return hiddenCount > 0
             ? `${visibleSummaries.join(' | ')} | +${hiddenCount} more`
             : visibleSummaries.join(' | ');
     }
 
-    private formatFilterSummary(option: AdvFilterOptions): string {
+    private formatFilterSummary(option: AdvFilterOptions, maxVisibleSelections = 2): string {
         if (option.type === 'range') {
             const [min, max] = option.value;
             return `${option.label} ${option.displayText ?? `${min}-${max}`}`;
+        }
+
+        if (option.type === 'boolean') {
+            return option.value === 'or'
+                ? `${option.label} Yes`
+                : option.value === 'not'
+                    ? `${option.label} No`
+                    : '';
         }
 
         if (option.displayText) {
@@ -785,7 +1315,7 @@ export class SearchForceGeneratorDialogComponent {
                 return '';
             }
 
-            const visibleValues = option.value.slice(0, 2);
+            const visibleValues = option.value.slice(0, maxVisibleSelections);
             const hiddenCount = option.value.length - visibleValues.length;
             return `${option.label} ${visibleValues.join(', ')}${hiddenCount > 0 ? ` +${hiddenCount}` : ''}`;
         }
@@ -797,9 +1327,21 @@ export class SearchForceGeneratorDialogComponent {
             return '';
         }
 
-        const visibleSelections = activeSelections.slice(0, 2);
+        const visibleSelections = activeSelections.slice(0, maxVisibleSelections);
         const hiddenCount = activeSelections.length - visibleSelections.length;
         return `${option.label} ${visibleSelections.join(', ')}${hiddenCount > 0 ? ` +${hiddenCount}` : ''}`;
+    }
+
+    private formatFactionGenerationModeSummary(): string | null {
+        if (this.randomFactionSelected()) {
+            return 'Faction mode: Random';
+        }
+
+        if (this.positiveFactionSelectionCount() > 1 && !this.mergeSelectedFactionAvailability()) {
+            return 'Faction mode: Random selected faction';
+        }
+
+        return null;
     }
 
     private setBudgetRangeForSystem(gameSystem: GameSystem, range: { min: number; max: number }): void {
@@ -864,6 +1406,74 @@ export class SearchForceGeneratorDialogComponent {
         }
     }
 
+    private setSkillRange(type: 'gunnery' | 'piloting', range: readonly [number, number]): void {
+        const currentRange = type === 'gunnery'
+            ? this.gunnerySkillRange()
+            : this.pilotingSkillRange();
+        const nextRange = this.normalizeSkillRange(range, currentRange);
+        const didChangeMin = currentRange[0] !== nextRange[0];
+        const didChangeMax = currentRange[1] !== nextRange[1];
+
+        if (!didChangeMin && !didChangeMax) {
+            return;
+        }
+
+        if (type === 'gunnery') {
+            this.gunnerySkillRange.set(nextRange);
+        } else {
+            this.pilotingSkillRange.set(nextRange);
+        }
+
+        const optionKeys = this.forceGeneratorService.getStoredSkillOptionKeys();
+        const minOptionKey = type === 'gunnery' ? optionKeys.gunneryMin : optionKeys.pilotingMin;
+        const maxOptionKey = type === 'gunnery' ? optionKeys.gunneryMax : optionKeys.pilotingMax;
+
+        if (didChangeMin) {
+            void this.optionsService.setOption(minOptionKey, nextRange[0]);
+        }
+        if (didChangeMax) {
+            void this.optionsService.setOption(maxOptionKey, nextRange[1]);
+        }
+    }
+
+    private setMaxPilotSkillDelta(value: number): void {
+        const nextValue = this.normalizeMaxPilotSkillDelta(value);
+        if (this.maxPilotSkillDelta() === nextValue) {
+            return;
+        }
+
+        this.maxPilotSkillDelta.set(nextValue);
+        void this.optionsService.setOption(
+            this.forceGeneratorService.getStoredSkillOptionKeys().maxDelta,
+            nextValue,
+        );
+    }
+
+    private normalizeSkillValue(value: number, fallback: number): number {
+        const resolvedValue = Number.isFinite(value) ? value : fallback;
+        return Math.min(this.maxPilotSkill, Math.max(this.minPilotSkill, Math.floor(resolvedValue)));
+    }
+
+    private normalizeSkillRange(
+        range: readonly [number, number],
+        fallback: readonly [number, number],
+    ): [number, number] {
+        const firstValue = this.normalizeSkillValue(range[0], fallback[0]);
+        const secondValue = this.normalizeSkillValue(range[1], fallback[1]);
+        return [Math.min(firstValue, secondValue), Math.max(firstValue, secondValue)];
+    }
+
+    private normalizeMaxPilotSkillDelta(value: number): number {
+        return Math.min(this.maxPilotSkill, Math.max(0, Math.floor(Number.isFinite(value) ? value : this.maxPilotSkillDelta())));
+    }
+
+    private toSkillRangeObject(range: readonly [number, number]): ForceGenerationSkillRange {
+        return {
+            min: range[0],
+            max: range[1],
+        };
+    }
+
     private parseNumericValue(event: Event, fallback: number): number {
         const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
         return Number.isFinite(value) ? value : fallback;
@@ -894,20 +1504,107 @@ export class SearchForceGeneratorDialogComponent {
         });
     }
 
-    private toLockedGeneratedUnit(unitEntry: ForcePreviewUnit, index: number): GeneratedForceUnit | null {
+    private changePreviewUnitVariant(unitEntry: ForcePreviewUnit, variant: Unit): void {
+        if (!unitEntry.unit || unitEntry.unit.name === variant.name) {
+            return;
+        }
+
+        let didChange = false;
+        let gameSystem = this.gameSystem();
+        this.previewState.update((preview) => {
+            const index = this.findPreviewUnitIndex(preview.units, unitEntry);
+            if (index < 0) {
+                return preview;
+            }
+
+            gameSystem = preview.gameSystem;
+            const units = [...preview.units];
+            units[index] = this.createReplacementPreviewUnit(units[index], variant, gameSystem);
+            didChange = true;
+
+            return {
+                ...preview,
+                units,
+                totalCost: units.reduce((sum, unit) => sum + unit.cost, 0),
+            };
+        });
+
+        if (!didChange) {
+            return;
+        }
+
+        const lockKey = unitEntry.lockKey;
+        if (lockKey) {
+            this.lockedUnits.update((lockedUnits) => lockedUnits.map((unit) => (
+                unit.lockKey === lockKey
+                    ? this.createReplacementPreviewUnit(unit, variant, gameSystem)
+                    : unit
+            )));
+        }
+
+        this.clearHoveredPreviewUnit();
+        this.clearSelectedPreviewUnit();
+    }
+
+    private findPreviewUnitIndex(units: readonly GeneratedForceUnit[], unitEntry: ForcePreviewUnit): number {
+        if (unitEntry.lockKey) {
+            const lockKeyIndex = units.findIndex((unit) => unit.lockKey === unitEntry.lockKey);
+            if (lockKeyIndex >= 0) {
+                return lockKeyIndex;
+            }
+        }
+
+        return units.findIndex((unit) => unit.unit === unitEntry.unit || unit.unit.name === unitEntry.unit?.name);
+    }
+
+    private createReplacementPreviewUnit(
+        original: GeneratedForceUnit,
+        variant: Unit,
+        gameSystem: GameSystem,
+    ): GeneratedForceUnit {
+        const defaultGunnery = this.gunnerySkillRange()[0];
+        const defaultPiloting = this.pilotingSkillRange()[0];
+        const skill = gameSystem === GameSystem.ALPHA_STRIKE
+            ? original.skill ?? original.gunnery ?? defaultGunnery
+            : undefined;
+        const gunnery = gameSystem === GameSystem.CLASSIC
+            ? original.gunnery ?? original.skill ?? defaultGunnery
+            : undefined;
+        const piloting = gameSystem === GameSystem.CLASSIC
+            ? original.piloting ?? defaultPiloting
+            : undefined;
+
+        return {
+            ...original,
+            unit: variant,
+            cost: this.forceGeneratorService.getBudgetMetric(
+                variant,
+                gameSystem,
+                skill ?? gunnery ?? defaultGunnery,
+                piloting ?? defaultPiloting,
+            ),
+            skill,
+            gunnery,
+            piloting,
+        };
+    }
+
+    private toLockedGeneratedUnit(unitEntry: ForcePreviewUnit): GeneratedForceUnit | null {
         if (!unitEntry.unit) {
             return null;
         }
 
         const gameSystem = this.gameSystem();
+        const defaultGunnery = this.gunnerySkillRange()[0];
+        const defaultPiloting = this.pilotingSkillRange()[0];
         const skill = gameSystem === GameSystem.ALPHA_STRIKE
-            ? unitEntry.skill ?? this.pilotGunnerySkill()
+            ? unitEntry.skill ?? defaultGunnery
             : undefined;
         const gunnery = gameSystem === GameSystem.CLASSIC
-            ? unitEntry.gunnery ?? this.pilotGunnerySkill()
+            ? unitEntry.gunnery ?? defaultGunnery
             : undefined;
         const piloting = gameSystem === GameSystem.CLASSIC
-            ? unitEntry.piloting ?? this.pilotPilotingSkill()
+            ? unitEntry.piloting ?? defaultPiloting
             : undefined;
 
         return {
@@ -915,15 +1612,15 @@ export class SearchForceGeneratorDialogComponent {
             cost: this.forceGeneratorService.getBudgetMetric(
                 unitEntry.unit,
                 gameSystem,
-                skill ?? gunnery ?? this.pilotGunnerySkill(),
-                piloting ?? this.pilotPilotingSkill(),
+                skill ?? gunnery ?? defaultGunnery,
+                piloting ?? defaultPiloting,
             ),
             skill,
             gunnery,
             piloting,
             alias: unitEntry.alias,
             commander: unitEntry.commander,
-            lockKey: unitEntry.lockKey ?? `imported:${index}:${unitEntry.unit.name}`,
+            lockKey: unitEntry.lockKey ?? generateUUID(),
         };
     }
 }

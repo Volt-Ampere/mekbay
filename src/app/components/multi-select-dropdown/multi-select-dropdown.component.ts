@@ -47,9 +47,13 @@ export interface DropdownOption {
     img?: string;
     available?: boolean;
     count?: number;
+    alwaysVisible?: boolean;
+    exclusive?: boolean;
+    stateCycle?: readonly ('or' | 'and' | 'not')[];
 }
 
 export type MultiState = false | 'or' | 'and' | 'not';
+type SelectableMultiState = Exclude<MultiState, false>;
 
 /** Operators for quantity constraints on countable filters */
 export type CountOperator = '=' | '!=' | '>' | '<' | '>=' | '<=';
@@ -123,6 +127,7 @@ export class MultiSelectDropdownComponent {
     label = input<string>('');
     multiselect = input<boolean>(true);
     multistate = input<boolean>(false);
+    stateCycle = input<readonly SelectableMultiState[]>(['or', 'and', 'not']);
     countable = input<boolean>(false);
     keepUnavailableVisible = input<boolean>(false);
     semanticOnly = input<boolean>(false);
@@ -191,6 +196,8 @@ export class MultiSelectDropdownComponent {
             .map(s => ({ state: s, count: counts.get(s)! }));
     });
 
+    singleSelectedOption = computed(() => this.selectedOptions()[0] ?? null);
+
     maxHeightOptions = computed(() => {
         if (!this.isOpen()) {
             return MultiSelectDropdownComponent.DEFAULT_PANEL_HEIGHT_FALLBACK;
@@ -210,9 +217,10 @@ export class MultiSelectDropdownComponent {
         
         const searchTokens = parseSearchQuery(this.filterText());
         const hasActiveFilter = this.filterText().trim().length > 0;
-        const nameFiltered = this.options().filter(option => 
-            matchesSearch(option.name, searchTokens, true) || 
-            (option.displayName && matchesSearch(option.displayName, searchTokens, true))
+        const nameFiltered = this.options().filter(option =>
+            option.alwaysVisible === true
+            || matchesSearch(option.name, searchTokens, true)
+            || (option.displayName && matchesSearch(option.displayName, searchTokens, true))
         );
 
         // if the toggle is off, hide unavailable items
@@ -692,20 +700,33 @@ export class MultiSelectDropdownComponent {
         const restoreState = this.captureScrollRestoreState(optionName);
 
         if (this.multistate()) {
+            const option = this.options().find((entry) => entry.name === optionName);
             const sel = this.selected();
             const currentSelection: MultiStateSelection = (sel && !Array.isArray(sel)) ? { ...sel } : {};
             const current = currentSelection[optionName] || { state: false as MultiState, count: 1 };
-            let nextState: MultiState;
-            switch (current.state) {
-                case false: nextState = 'or'; break;
-                case 'or': nextState = 'and'; break;
-                case 'and': nextState = 'not'; break;
-                case 'not': nextState = false; break;
-                default: nextState = 'or';
-            }
+            const cycle = this.getSelectableStateCycle(option);
+            const currentIndex = current.state === false ? -1 : cycle.indexOf(current.state);
+            const nextState: MultiState = currentIndex >= 0 && currentIndex < cycle.length - 1
+                ? cycle[currentIndex + 1]
+                : currentIndex === -1
+                    ? cycle[0]
+                    : false;
             if (nextState === false) {
                 delete currentSelection[optionName];
             } else {
+                if (option?.exclusive) {
+                    this.selectionChange.emit({
+                        [optionName]: { name: optionName, state: nextState, count: 1 },
+                    });
+                    this.restoreScrollPosition(restoreState);
+                    return;
+                }
+
+                for (const exclusiveOption of this.options()) {
+                    if (exclusiveOption.exclusive) {
+                        delete currentSelection[exclusiveOption.name];
+                    }
+                }
                 const count = nextState === 'not' ? 1 : current.count;
                 currentSelection[optionName] = { name: optionName, state: nextState, count };
             }
@@ -724,6 +745,14 @@ export class MultiSelectDropdownComponent {
         }
         
         this.restoreScrollPosition(restoreState);
+    }
+
+    private getSelectableStateCycle(option?: DropdownOption): readonly SelectableMultiState[] {
+        const rawStates = option?.stateCycle ?? this.stateCycle();
+        const states = rawStates.filter((state): state is SelectableMultiState => (
+            state === 'or' || state === 'and' || state === 'not'
+        ));
+        return states.length > 0 ? states : ['or'];
     }
 
     private captureScrollRestoreState(optionName: string): ScrollRestoreState | null {

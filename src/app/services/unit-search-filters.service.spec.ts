@@ -2,6 +2,8 @@ import { provideZonelessChangeDetection, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { TestBed } from '@angular/core/testing';
 import type { Eras } from '../models/eras.model';
+import type { Faction } from '../models/factions.model';
+import type { ForceUnit } from '../models/force-unit.model';
 import type { MULFactions } from '../models/mulfactions.model';
 import { MULFACTION_EXTINCT } from '../models/mulfactions.model';
 import type { AvailabilitySource } from '../models/options.model';
@@ -14,6 +16,7 @@ import { LoggerService } from './logger.service';
 import { OptionsService } from './options.service';
 import { PublicTagsService } from './public-tags.service';
 import { TagsService } from './tags.service';
+import { UnitAvailabilitySourceService } from './unit-availability-source.service';
 import { UnitInitializerService } from './unit-initializer.service';
 import { UnitSearchFiltersService } from './unit-search-filters.service';
 import { UrlStateService } from './url-state.service';
@@ -26,10 +29,11 @@ import {
     usesIndexedDropdownUniverse,
 } from '../utils/unit-search-filter-config.util';
 import { MEGAMEK_AVAILABILITY_UNKNOWN, type MegaMekWeightedAvailabilityRecord } from '../models/megamek/availability.model';
-import { MEGAMEK_RARITY_PRODUCTION_SORT_KEY } from './unit-search-filters.model';
+import { FORMATION_TARGET_FILTER_KEY, MEGAMEK_RARITY_PRODUCTION_SORT_KEY } from './unit-search-filters.model';
 import { SEARCH_WORKER_FACTORY } from '../utils/unit-search-worker-factory.util';
 import type { SearchWorkerLike } from '../utils/unit-search-worker-client.util';
 import type { UnitSearchWorkerResponseMessage } from '../utils/unit-search-worker-protocol.util';
+import { createEmptyUnit, type TestUnitOverrides } from '../testing/unit-test-helpers';
 
 const originalJasmineTimeoutInterval = jasmine.DEFAULT_TIMEOUT_INTERVAL;
 jasmine.DEFAULT_TIMEOUT_INTERVAL = 60000;
@@ -86,7 +90,8 @@ function prepareUnitForSearch(unit: Unit, index: number): Unit {
     clone.comp = clone.comp ?? [];
     clone.quirks = clone.quirks ?? [];
     clone.features = clone.features ?? [];
-    clone.source = clone.source ?? [];
+    clone.source = Array.isArray(clone.source) ? clone.source : [];
+    clone.published = Array.isArray(clone.published) ? clone.published : [];
     return clone;
 }
 
@@ -157,10 +162,11 @@ function buildSmallBundle(payload: BenchmarkBundle): BenchmarkBundle {
     firstUnit.as.specials = ['ECM'];
     firstUnit.year = 3050;
     firstUnit.source = ['SRC-A'];
+    firstUnit.published = [];
     firstUnit.comp = [{ id: 'laser', q: 1, n: 'Laser', t: 'E', p: 0, l: 'CT' }];
     firstUnit.features = ['CASE'];
     firstUnit.quirks = ['Accurate Weapon'];
-    firstUnit._nameTags = ['tag-a'];
+    firstUnit._nameTags = [{ tag: 'tag-a', quantity: 1 }];
     firstUnit._chassisTags = [];
     firstUnit._publicTags = [];
 
@@ -175,10 +181,11 @@ function buildSmallBundle(payload: BenchmarkBundle): BenchmarkBundle {
     secondUnit.as.specials = ['TAG'];
     secondUnit.year = 3050;
     secondUnit.source = ['SRC-B'];
+    secondUnit.published = [];
     secondUnit.comp = [{ id: 'cannon', q: 1, n: 'Cannon', t: 'B', p: 0, l: 'FR' }];
     secondUnit.features = ['Amphibious'];
     secondUnit.quirks = ['Poor Performance'];
-    secondUnit._nameTags = ['tag-b'];
+    secondUnit._nameTags = [{ tag: 'tag-b', quantity: 1 }];
     secondUnit._chassisTags = [];
     secondUnit._publicTags = [];
 
@@ -219,30 +226,23 @@ function buildSmallBundle(payload: BenchmarkBundle): BenchmarkBundle {
     };
 }
 
-function createTestUnit(overrides: Partial<Unit>): Unit {
-    return {
+function createTestUnit(overrides: TestUnitOverrides = {}): Unit {
+    const { as: asOverrides, ...unitOverrides } = overrides;
+
+    return createEmptyUnit({
         name: 'Test Unit',
         id: 1,
         chassis: 'Test Unit',
         model: 'Prime',
         year: 3050,
-        weightClass: 'Medium',
-        tons: 50,
-        offSpeedFactor: 0,
         bv: 1000,
         pv: 35,
         cost: 1000000,
         level: 2,
-        techBase: 'Inner Sphere',
-        techRating: 'D',
-        type: 'Mek',
-        subtype: 'BattleMek',
-        omni: 0,
-        engine: 'Fusion',
         engineRating: 250,
         engineHS: 10,
-        engineHSType: 'Heat Sink',
         source: ['SRC-A'],
+        published: [],
         role: 'Skirmisher',
         armorType: 'Standard',
         structureType: 'Standard',
@@ -256,53 +256,28 @@ function createTestUnit(overrides: Partial<Unit>): Unit {
         walk2: 5,
         run: 8,
         run2: 8,
-        jump: 0,
-        jump2: 0,
-        umu: 0,
-        c3: '',
         dpt: 10,
         comp: [{ id: 'laser', q: 1, n: 'Laser', t: 'E', p: 0, l: 'CT' }],
         su: 1,
-        crewSize: 1,
-        quirks: [],
-        features: [],
-        icon: '',
-        sheets: [],
+        _publicTags: [],
+        ...unitOverrides,
         as: {
             TP: 'BM',
             PV: 35,
             SZ: 2,
             TMM: 1,
-            usesOV: false,
-            OV: 0,
             MV: '8',
             MVm: { '': 8 },
-            usesTh: false,
-            Th: 0,
             Arm: 4,
             Str: 4,
-            specials: [],
             dmg: {
                 dmgS: '3',
                 dmgM: '2',
                 dmgL: '1',
-                dmgE: '0',
             },
-            usesE: false,
-            usesArcs: false,
+            ...asOverrides,
         },
-        _searchKey: '',
-        _displayType: '',
-        _maxRange: 0,
-        _weightedMaxRange: 0,
-        _dissipationEfficiency: 0,
-        _mdSumNoPhysical: 0,
-        _mdSumNoPhysicalNoOneshots: 0,
-        _nameTags: [],
-        _chassisTags: [],
-        _publicTags: [],
-        ...overrides,
-    };
+    });
 }
 
 function createStandaloneBundle(): BenchmarkBundle {
@@ -321,7 +296,7 @@ function createStandaloneBundle(): BenchmarkBundle {
             TP: 'BM',
             specials: ['ECM'],
         },
-        _nameTags: ['tag-a'],
+        _nameTags: [{ tag: 'tag-a', quantity: 1 }],
     });
     const secondUnit = createTestUnit({
         id: 2,
@@ -340,7 +315,7 @@ function createStandaloneBundle(): BenchmarkBundle {
             TP: 'CV',
             specials: ['TAG'],
         },
-        _nameTags: ['tag-b'],
+        _nameTags: [{ tag: 'tag-b', quantity: 1 }],
     });
 
     return {
@@ -380,6 +355,212 @@ function createStandaloneBundle(): BenchmarkBundle {
     };
 }
 
+const FREE_WORLDS_LEAGUE_FACTION = 'Free Worlds League';
+const FEDERATED_SUNS_FACTION = 'Federated Suns';
+const CLAN_WOLF_FACTION = 'Clan Wolf';
+const RASALHAGUE_DOMINION_FACTION = 'Rasalhague Dominion';
+
+const CLAN_WOLF_TEST_FACTION: Faction = {
+    id: 3,
+    name: CLAN_WOLF_FACTION,
+    group: 'IS Clan',
+    img: '',
+    eras: {},
+};
+
+type NamedAvailabilityOption = { name: string; available?: boolean };
+
+function createFormationFactionBundle(): BenchmarkBundle {
+    const bundle = createStandaloneBundle();
+    bundle.factions.factions = [
+        {
+            id: 1,
+            name: FREE_WORLDS_LEAGUE_FACTION,
+            group: 'Inner Sphere',
+            img: '',
+            eras: { 1: new Set([1]) },
+        },
+        {
+            id: 2,
+            name: FEDERATED_SUNS_FACTION,
+            group: 'Inner Sphere',
+            img: '',
+            eras: { 1: new Set([2]) },
+        },
+        {
+            id: 3,
+            name: CLAN_WOLF_FACTION,
+            group: 'IS Clan',
+            img: '',
+            eras: { 1: new Set([1]) },
+        },
+        {
+            id: 4,
+            name: RASALHAGUE_DOMINION_FACTION,
+            group: 'IS Clan',
+            img: '',
+            eras: { 1: new Set([1]) },
+        },
+    ];
+    return bundle;
+}
+
+function createStrategicCommandBundle(): BenchmarkBundle {
+    const firstAerospace = createTestUnit({
+        id: 1,
+        name: 'Batu Prime',
+        chassis: 'Batu',
+        type: 'Aero',
+        subtype: 'Aerospace Fighter',
+        role: 'Interceptor',
+        as: {
+            ...createTestUnit({}).as,
+            TP: 'AF',
+            SZ: 3,
+            MVm: { a: 20 },
+        },
+    });
+    const secondAerospace = createTestUnit({
+        id: 2,
+        name: 'Visigoth Prime',
+        chassis: 'Visigoth',
+        type: 'Aero',
+        subtype: 'Aerospace Fighter',
+        role: 'Fast Dogfighter',
+        as: {
+            ...createTestUnit({}).as,
+            TP: 'AF',
+            SZ: 3,
+            MVm: { a: 22 },
+        },
+    });
+    const heavyMek = createTestUnit({
+        id: 3,
+        name: 'Timber Wolf Prime',
+        chassis: 'Timber Wolf',
+        weightClass: 'Heavy',
+        type: 'Mek',
+        subtype: 'BattleMek',
+        as: {
+            ...createTestUnit({}).as,
+            TP: 'BM',
+            SZ: 3,
+        },
+    });
+    const battleArmor = createTestUnit({
+        id: 4,
+        name: 'Elemental Point',
+        chassis: 'Elemental',
+        type: 'Infantry',
+        subtype: 'Battle Armor',
+        as: {
+            ...createTestUnit({}).as,
+            TP: 'BA',
+            SZ: 1,
+        },
+    });
+    const lightMek = createTestUnit({
+        id: 5,
+        name: 'Adder Prime',
+        chassis: 'Adder',
+        weightClass: 'Light',
+        type: 'Mek',
+        subtype: 'BattleMek',
+        as: {
+            ...createTestUnit({}).as,
+            TP: 'BM',
+            SZ: 1,
+        },
+    });
+    const tank = createTestUnit({
+        id: 6,
+        name: 'Vedette Tank',
+        chassis: 'Vedette',
+        type: 'Tank',
+        subtype: 'Combat Vehicle',
+        as: {
+            ...createTestUnit({}).as,
+            TP: 'CV',
+            SZ: 2,
+        },
+    });
+
+    return {
+        units: {
+            version: 'test',
+            etag: 'test',
+            units: [firstAerospace, secondAerospace, heavyMek, battleArmor, lightMek, tank],
+        },
+        eras: {
+            version: 'test',
+            etag: 'test',
+            eras: [{
+                id: 1,
+                name: 'Clan Invasion',
+                img: '',
+                years: {
+                    from: 3050,
+                    to: 3100,
+                },
+                units: [1, 2, 3, 4, 5, 6],
+                factions: [],
+            }],
+        },
+        factions: {
+            version: 'test',
+            etag: 'test',
+            factions: [{
+                ...CLAN_WOLF_TEST_FACTION,
+                eras: {
+                    1: new Set([1, 2, 3, 4, 5, 6]),
+                },
+            }],
+        },
+    };
+}
+
+function createFormationExistingForceUnit(
+    unit: Unit,
+    gameSystem: GameSystem = GameSystem.ALPHA_STRIKE,
+    options: { faction?: Faction; pilotSkill?: number; gunnerySkill?: number } = {},
+): ForceUnit {
+    return {
+        force: {
+            faction: () => options.faction ?? null,
+            era: () => null,
+            techBase: () => 'Inner Sphere',
+            gameSystem,
+        },
+        getUnit: () => unit,
+        getBv: () => 0,
+        pilotSkill: () => options.pilotSkill ?? 4,
+        gunnerySkill: () => options.gunnerySkill ?? 4,
+    } as unknown as ForceUnit;
+}
+
+function namedAvailabilityOptions(options: readonly (number | NamedAvailabilityOption)[]): NamedAvailabilityOption[] {
+    return options.filter((option): option is NamedAvailabilityOption => typeof option !== 'number');
+}
+
+function expectOptionAvailability(
+    options: readonly (number | NamedAvailabilityOption)[],
+    name: string,
+    available: boolean,
+): void {
+    expect(namedAvailabilityOptions(options).find((option) => option.name === name))
+        .toEqual(jasmine.objectContaining({ name, available }));
+}
+
+function setFactionFilter(service: UnitSearchFiltersService, factionName: string): void {
+    service.setFilter('faction', {
+        [factionName]: {
+            name: factionName,
+            state: 'or',
+            count: 1,
+        },
+    });
+}
+
 function buildSyntheticMegaMekRarityBenchmarkScenario(targetCount: number): SyntheticMegaMekRarityBenchmarkScenario {
     const bundle = buildBenchmarkBundle(createStandaloneBundle(), targetCount);
     let expectedTopScore = -1;
@@ -389,24 +570,24 @@ function buildSyntheticMegaMekRarityBenchmarkScenario(targetCount: number): Synt
             return [];
         }
 
-        let productionScore = (index % 10) + 1;
-        let salvageScore = (((index + 3) % 8) + 1) * 1.2;
+        let requisitionScore = ((index % 10) * 10) + 5;
+        let salvageScore = ((((index + 3) % 8) + 1) * 12) - 5;
 
         if (index % 10 === 0) {
-            productionScore = 0;
+            requisitionScore = 0;
         }
         if (index % 15 === 0) {
             salvageScore = 0;
         }
 
-        const effectiveScore = Math.max(productionScore, salvageScore);
+        const effectiveScore = Math.max(requisitionScore, salvageScore);
         expectedTopScore = Math.max(expectedTopScore, effectiveScore);
 
         return [{
             n: unit.name,
             e: {
                 '1': {
-                    '1': [productionScore, salvageScore] as [number, number],
+                    '1': [requisitionScore, salvageScore] as [number, number],
                 },
             },
         }];
@@ -497,6 +678,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
             getNameTags: () => ({}),
             getChassisTags: () => ({}),
             getTagData: async () => ({ tags: {}, timestamp: 0, formatVersion: 3 as const }),
+            fixNameTagsCoveredByChassis: jasmine.createSpy('fixNameTagsCoveredByChassis').and.resolveTo(undefined),
             setRefreshUnitsCallback: jasmine.createSpy('setRefreshUnitsCallback'),
             setNotifyStoreUpdatedCallback: jasmine.createSpy('setNotifyStoreUpdatedCallback'),
             registerWsHandlers: jasmine.createSpy('registerWsHandlers'),
@@ -708,6 +890,413 @@ describe('UnitSearchFiltersService search telemetry', () => {
         expect(service.forceGeneratorEligibleUnits().map(unit => unit.name)).toEqual(['Test Mek', 'Test Tank']);
     });
 
+    it('filters normal search results by an active formation target while generator eligibility ignores it', () => {
+        const bundle = createStandaloneBundle();
+        const { service } = createService(bundle);
+        const existingForceUnit = createFormationExistingForceUnit(bundle.units.units[0]);
+
+        service.setFormationTarget({
+            formationId: 'order-lance',
+            existingUnits: [existingForceUnit],
+            gameSystem: GameSystem.ALPHA_STRIKE,
+        });
+
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Test Mek']);
+        expect(service.forceGeneratorEligibleUnits().map(unit => unit.name)).toEqual(['Test Mek', 'Test Tank']);
+    });
+
+    it('clears the active formation target when filters are reset', () => {
+        const bundle = createStandaloneBundle();
+        const { service } = createService(bundle);
+        const existingForceUnit = createFormationExistingForceUnit(bundle.units.units[0]);
+
+        service.setFormationTarget({
+            formationId: 'order-lance',
+            existingUnits: [existingForceUnit],
+            gameSystem: GameSystem.ALPHA_STRIKE,
+        });
+
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Test Mek']);
+
+        service.resetFilters();
+
+        expect(service.formationTarget()).toBeNull();
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Test Mek', 'Test Tank']);
+    });
+
+    it('replaces a manual formation target when formation is entered as semantic search text', () => {
+        const bundle = createStandaloneBundle();
+        const { service, gameServiceStub } = createService(bundle);
+        const existingForceUnit = createFormationExistingForceUnit(bundle.units.units[0]);
+
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+        service.setFormationTarget({
+            formationId: 'assault-lance',
+            existingUnits: [existingForceUnit],
+            gameSystem: GameSystem.ALPHA_STRIKE,
+        });
+
+        service.setSearchText('formation=Order');
+
+        expect(service.semanticFormationTargetId()).toBe('order-lance');
+        expect(service.formationTarget()).toBeNull();
+
+        service.setSearchText('');
+
+        expect(service.semanticFormationTargetId()).toBeNull();
+        expect(service.formationTarget()).toBeNull();
+    });
+
+    it('filters normal search results by a semantic formation target while generator eligibility ignores it', () => {
+        const bundle = createStandaloneBundle();
+        const { service, gameServiceStub } = createService(bundle);
+        const existingForceUnit = createFormationExistingForceUnit(bundle.units.units[0]);
+
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+        service.setFormationTargetExistingUnits([existingForceUnit]);
+        service.setSearchText('formation=Order');
+
+        expect(service.semanticFilterKeys().has(FORMATION_TARGET_FILTER_KEY)).toBeTrue();
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Test Mek']);
+        expect(service.forceGeneratorEligibleUnits().map(unit => unit.name)).toEqual(['Test Mek', 'Test Tank']);
+    });
+
+    it('does not let unassigned catalog skills block Strategic Command formation filtering', () => {
+        const bundle = createStrategicCommandBundle();
+        const { service, gameServiceStub } = createService(bundle);
+        const existingUnits = [
+            createFormationExistingForceUnit(bundle.units.units[0], GameSystem.ALPHA_STRIKE, { faction: CLAN_WOLF_TEST_FACTION, pilotSkill: 4, gunnerySkill: 4 }),
+            createFormationExistingForceUnit(bundle.units.units[1], GameSystem.ALPHA_STRIKE, { faction: CLAN_WOLF_TEST_FACTION, pilotSkill: 4, gunnerySkill: 4 }),
+        ];
+
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+        service.setFormationTarget({
+            formationId: 'strategic-command-star',
+            existingUnits,
+            gameSystem: GameSystem.ALPHA_STRIKE,
+        });
+
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Elemental Point', 'Timber Wolf Prime']);
+
+        service.setSearchText('formation="Strategic Command"');
+
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Elemental Point', 'Timber Wolf Prime']);
+    });
+
+    it('limits faction dropdown availability by manual and semantic formation targets', () => {
+        const createAlphaStrikeService = () => {
+            const created = createService(createFormationFactionBundle());
+            created.gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+            return created.service;
+        };
+
+        let service = createAlphaStrikeService();
+        service.setFormationTarget({ formationId: 'anvil-lance', existingUnits: [], gameSystem: GameSystem.ALPHA_STRIKE });
+
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FREE_WORLDS_LEAGUE_FACTION, true);
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FEDERATED_SUNS_FACTION, false);
+
+        service = createAlphaStrikeService();
+        service.setSearchText('formation=Anvil');
+
+        expect(service.semanticFormationTargetId()).toBe('anvil-lance');
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FREE_WORLDS_LEAGUE_FACTION, true);
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FEDERATED_SUNS_FACTION, false);
+    });
+
+    it('limits MegaMek faction dropdown availability by semantic formation targets', () => {
+        const bundle = createFormationFactionBundle();
+        const { dataService, service, optionsServiceStub, gameServiceStub } = createService(bundle);
+        spyOn(dataService, 'getMegaMekAvailabilityRecords').and.returnValue([
+            {
+                n: bundle.units.units[0].name,
+                e: {
+                    '1': { '1': [45, 0] },
+                },
+            },
+            {
+                n: bundle.units.units[1].name,
+                e: {
+                    '1': { '2': [45, 0] },
+                },
+            },
+        ]);
+        spyOn(dataService, 'getMegaMekAvailabilityRecordForUnit').and.callFake((unit: Pick<Unit, 'name'>) => {
+            return dataService.getMegaMekAvailabilityRecords().find((record) => record.n === unit.name);
+        });
+        optionsServiceStub.options.set({
+            ...optionsServiceStub.options(),
+            availabilitySource: 'megamek',
+        });
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+
+        service.setSearchText('formation=Anvil');
+
+        expect(service.semanticFormationTargetId()).toBe('anvil-lance');
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FREE_WORLDS_LEAGUE_FACTION, true);
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FEDERATED_SUNS_FACTION, false);
+    });
+
+    it('limits MUL era dropdown availability by exclusive formation targets', () => {
+        const bundle = createFormationFactionBundle();
+        bundle.eras.eras = [
+            {
+                id: 1,
+                name: 'League Era',
+                img: '',
+                years: { from: 3000, to: 3050 },
+                units: [1],
+                factions: [],
+            },
+            {
+                id: 2,
+                name: 'Suns Era',
+                img: '',
+                years: { from: 3051, to: 3100 },
+                units: [2],
+                factions: [],
+            },
+        ];
+        bundle.factions.factions = [
+            {
+                id: 1,
+                name: FREE_WORLDS_LEAGUE_FACTION,
+                group: 'Inner Sphere',
+                img: '',
+                eras: { 1: new Set([1]) },
+            },
+            {
+                id: 2,
+                name: FEDERATED_SUNS_FACTION,
+                group: 'Inner Sphere',
+                img: '',
+                eras: { 2: new Set([2]) },
+            },
+        ];
+        const { service, gameServiceStub } = createService(bundle);
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+
+        service.setFormationTarget({ formationId: 'anvil-lance', existingUnits: [], gameSystem: GameSystem.ALPHA_STRIKE });
+
+        expectOptionAvailability(service.advOptions()['era']?.options ?? [], 'League Era', true);
+        expectOptionAvailability(service.advOptions()['era']?.options ?? [], 'Suns Era', false);
+    });
+
+    it('limits MegaMek era dropdown availability by exclusive formation targets', () => {
+        const bundle = createFormationFactionBundle();
+        bundle.eras.eras = [
+            {
+                id: 1,
+                name: 'League Era',
+                img: '',
+                years: { from: 3000, to: 3050 },
+                units: [1],
+                factions: [],
+            },
+            {
+                id: 2,
+                name: 'Suns Era',
+                img: '',
+                years: { from: 3051, to: 3100 },
+                units: [2],
+                factions: [],
+            },
+        ];
+        bundle.factions.factions = [
+            {
+                id: 1,
+                name: FREE_WORLDS_LEAGUE_FACTION,
+                group: 'Inner Sphere',
+                img: '',
+                eras: { 1: new Set([1]) },
+            },
+            {
+                id: 2,
+                name: FEDERATED_SUNS_FACTION,
+                group: 'Inner Sphere',
+                img: '',
+                eras: { 2: new Set([2]) },
+            },
+        ];
+        const { dataService, service, optionsServiceStub, gameServiceStub } = createService(bundle);
+        spyOn(dataService, 'getMegaMekAvailabilityRecords').and.returnValue([
+            {
+                n: bundle.units.units[0].name,
+                e: {
+                    '1': { '1': [45, 0] },
+                },
+            },
+            {
+                n: bundle.units.units[1].name,
+                e: {
+                    '2': { '2': [45, 0] },
+                },
+            },
+        ]);
+        spyOn(dataService, 'getMegaMekAvailabilityRecordForUnit').and.callFake((unit: Pick<Unit, 'name'>) => {
+            return dataService.getMegaMekAvailabilityRecords().find((record) => record.n === unit.name);
+        });
+        optionsServiceStub.options.set({
+            ...optionsServiceStub.options(),
+            availabilitySource: 'megamek',
+        });
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+
+        service.setFormationTarget({ formationId: 'anvil-lance', existingUnits: [], gameSystem: GameSystem.ALPHA_STRIKE });
+
+        expectOptionAvailability(service.advOptions()['era']?.options ?? [], 'League Era', true);
+        expectOptionAvailability(service.advOptions()['era']?.options ?? [], 'Suns Era', false);
+    });
+
+    it('limits formation dropdown availability by manual and semantic faction filters', () => {
+        const { service } = createService(createFormationFactionBundle());
+        const expectFormationAvailability = (formationId: string, available: boolean) => {
+            expect(service.getFormationTargetOptions(GameSystem.ALPHA_STRIKE).find((option) => option.name === formationId))
+                .toEqual(jasmine.objectContaining({ name: formationId, available }));
+        };
+
+        setFactionFilter(service, FEDERATED_SUNS_FACTION);
+
+        expectFormationAvailability('assault-lance', true);
+        expectFormationAvailability('rifle-lance', true);
+        expectFormationAvailability('anvil-lance', false);
+
+        setFactionFilter(service, FREE_WORLDS_LEAGUE_FACTION);
+
+        expectFormationAvailability('assault-lance', true);
+        expectFormationAvailability('anvil-lance', true);
+        expectFormationAvailability('rifle-lance', false);
+
+        const semanticService = createService(createFormationFactionBundle()).service;
+        semanticService.setSearchText(`faction="${FEDERATED_SUNS_FACTION}"`);
+        const expectSemanticFormationAvailability = (formationId: string, available: boolean) => {
+            expect(semanticService.getFormationTargetOptions(GameSystem.ALPHA_STRIKE).find((option) => option.name === formationId))
+                .toEqual(jasmine.objectContaining({ name: formationId, available }));
+        };
+
+        expectSemanticFormationAvailability('rifle-lance', true);
+        expectSemanticFormationAvailability('anvil-lance', false);
+    });
+
+    it('limits Clan-only formation availability to Clan faction filters', () => {
+        const { service } = createService(createFormationFactionBundle());
+        const expectFormationAvailability = (formationId: string, available: boolean) => {
+            expect(service.getFormationTargetOptions(GameSystem.ALPHA_STRIKE).find((option) => option.name === formationId))
+                .toEqual(jasmine.objectContaining({ name: formationId, available }));
+        };
+
+        setFactionFilter(service, FEDERATED_SUNS_FACTION);
+
+        expectFormationAvailability('phalanx-star', false);
+        expectFormationAvailability('strategic-command-star', false);
+
+        setFactionFilter(service, CLAN_WOLF_FACTION);
+
+        expectFormationAvailability('phalanx-star', true);
+        expectFormationAvailability('strategic-command-star', true);
+
+        setFactionFilter(service, RASALHAGUE_DOMINION_FACTION);
+
+        expectFormationAvailability('phalanx-star', true);
+        expectFormationAvailability('strategic-command-star', true);
+    });
+
+    it('limits faction dropdown availability by Clan-only formation targets', () => {
+        const { service, gameServiceStub } = createService(createFormationFactionBundle());
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+
+        service.setFormationTarget({ formationId: 'phalanx-star', existingUnits: [], gameSystem: GameSystem.ALPHA_STRIKE });
+
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], FEDERATED_SUNS_FACTION, false);
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], CLAN_WOLF_FACTION, true);
+        expectOptionAvailability(service.advOptions()['faction']?.options ?? [], RASALHAGUE_DOMINION_FACTION, true);
+    });
+
+    it('sorts formation target options alphabetically and resolves loose semantic names', () => {
+        const { service, gameServiceStub } = createService(createStandaloneBundle());
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+
+        const formationTargetOptions = service.getFormationTargetOptions(GameSystem.ALPHA_STRIKE);
+        const displayNames = formationTargetOptions
+            .slice(1)
+            .map((option) => option.displayName ?? option.name);
+
+        expect(displayNames).toEqual([...displayNames].sort((left, right) => left.localeCompare(right)));
+        expect(formationTargetOptions.find((option) => option.name === 'fire-support-lance')?.displayName)
+            .toBe('Fire Support');
+        expect(formationTargetOptions.find((option) => option.name === 'fire-support-squadron')?.displayName)
+            .toBe('Fire Support [Aero]');
+        expect(formationTargetOptions.find((option) => option.name === 'interceptor-squadron')?.displayName)
+            .toBe('Interceptor [Aero]');
+
+        service.setSearchText('formation=vehicle-command');
+
+        expect(service.semanticFormationTargetId()).toBe('vehicle-command-lance');
+    });
+
+    it('ignores the active formation target for worker-backed generator eligibility', async () => {
+        const worker = new FakeSearchWorker();
+        const bundle = createStandaloneBundle();
+        const { service } = createService(bundle, {
+            workerFactory: () => worker,
+        });
+        const existingForceUnit = createFormationExistingForceUnit(bundle.units.units[0]);
+
+        await flushAsyncWork();
+
+        service.setFormationTarget({
+            formationId: 'order-lance',
+            existingUnits: [existingForceUnit],
+            gameSystem: GameSystem.ALPHA_STRIKE,
+        });
+        service.searchText.set('Test');
+        service.filteredUnits();
+
+        const corpusVersion = (service as any).getWorkerCorpusVersion();
+        const snapshot = (service as any).getWorkerCorpusSnapshot(corpusVersion);
+        const request = (service as any).buildWorkerSearchRequest(corpusVersion);
+
+        (service as any).searchWorkerClient.submit(snapshot, request);
+        const initMessage = worker.messages.at(-1) as any;
+        worker.emit({ type: 'ready', corpusVersion: initMessage.snapshot.corpusVersion });
+        await flushAsyncWork();
+
+        const executeMessage = worker.messages.filter((message: any) => message.type === 'execute').at(-1) as any;
+        worker.emit({
+            type: 'result',
+            revision: executeMessage.request.revision,
+            corpusVersion: executeMessage.request.corpusVersion,
+            telemetryQuery: executeMessage.request.telemetryQuery,
+            unitNames: bundle.units.units.map((unit) => unit.name),
+            stages: [],
+            totalMs: 1,
+            unitCount: bundle.units.units.length,
+            isComplex: false,
+        });
+        await flushAsyncWork();
+
+        expect(service.filteredUnits().map(unit => unit.name)).toEqual(['Test Mek']);
+        expect(service.forceGeneratorEligibleUnits().map(unit => unit.name)).toEqual(['Test Mek', 'Test Tank']);
+    });
+
+    it('preserves complex OR semantic queries for worker execution', async () => {
+        const bundle = createStandaloneBundle();
+        const { service, gameServiceStub } = createService(bundle, {
+            workerFactory: () => new FakeSearchWorker(),
+        });
+
+        await flushAsyncWork();
+
+        gameServiceStub.currentGameSystem.set(GameSystem.ALPHA_STRIKE);
+        service.searchText.set('pv>0 or pv<0');
+
+        const corpusVersion = (service as any).getWorkerCorpusVersion();
+        const request = (service as any).buildWorkerSearchRequest(corpusVersion);
+
+        expect(request.executionQuery).toBe('pv>0 or pv<0');
+        expect(request.telemetryQuery).toBe('pv>0 or pv<0');
+    });
+
     it('distinguishes force packs by subtype when chassis and type match', () => {
         if (!benchmarkBundle || benchmarkBundle.units.units.length < 2) {
             pending('Real unit data could not be loaded for the force pack subtype test.');
@@ -859,8 +1448,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // c: bundle.units.units[0].chassis,
                 // m: bundle.units.units[0].model,
                 e: {
-                    '1': { '1': [5, 0] },
-                    '2': { '1': [4, 0] },
+                    '1': { '1': [45, 0] },
+                    '2': { '1': [35, 0] },
                 },
             },
             {
@@ -869,8 +1458,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // c: bundle.units.units[1].chassis,
                 // m: bundle.units.units[1].model,
                 e: {
-                    '1': { '2': [4, 0] },
-                    '2': { '2': [6, 0] },
+                    '1': { '2': [35, 0] },
+                    '2': { '2': [55, 0] },
                 },
             },
         ]);
@@ -955,8 +1544,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // c: bundle.units.units[0].chassis,
                 // m: bundle.units.units[0].model,
                 e: {
-                    '1': { '1': [5, 0] },
-                    '2': { '1': [4, 0] },
+                    '1': { '1': [45, 0] },
+                    '2': { '1': [35, 0] },
                 },
             },
             {
@@ -965,8 +1554,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // c: bundle.units.units[1].chassis,
                 // m: bundle.units.units[1].model,
                 e: {
-                    '1': { '2': [4, 0] },
-                    '2': { '2': [6, 0] },
+                    '1': { '2': [35, 0] },
+                    '2': { '2': [55, 0] },
                 },
             },
         ]);
@@ -1240,13 +1829,13 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // m: 'BWP-2B',
                 e: {
                     '9': {
-                        '27': [0, 1],
-                        '30': [0, 1],
-                        '34': [0, 1],
-                        '38': [0, 1],
-                        '42': [0, 1],
-                        '60': [6.6, 0],
-                        '87': [0, 1],
+                        '27': [0, 5],
+                        '30': [0, 5],
+                        '34': [0, 5],
+                        '38': [0, 5],
+                        '42': [0, 5],
+                        '60': [61, 0],
+                        '87': [0, 5],
                     },
                 },
             },
@@ -1263,7 +1852,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
         });
         service.setFilter('era', ['Age of War']);
         service.searchText.set('BWP-2B');
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
 
         let factionOptions = service.advOptions()['faction']?.options ?? [];
         let namedFactionOptions = factionOptions.filter((option): option is { name: string; available?: boolean } => typeof option !== 'number');
@@ -1342,7 +1931,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: bundle.units.units[0].name,
                 e: {
                     '9': {
-                        '30': [6.6, 1],
+                        '30': [61, 5],
                     },
                 },
             },
@@ -1368,7 +1957,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
         let availabilityFromOptions = service.advOptions()['availabilityFrom']?.options ?? [];
         let namedAvailabilityFromOptions = availabilityFromOptions.filter((option): option is { name: string; available?: boolean } => typeof option !== 'number');
 
-        expect(namedAvailabilityFromOptions.find((option) => option.name === 'Production')).toEqual(jasmine.objectContaining({ available: true }));
+        expect(namedAvailabilityFromOptions.find((option) => option.name === 'Requisition')).toEqual(jasmine.objectContaining({ available: true }));
         expect(namedAvailabilityFromOptions.find((option) => option.name === 'Salvage')).toEqual(jasmine.objectContaining({ available: false }));
 
         service.setFilter('availabilityRarity', ['Very Rare']);
@@ -1376,7 +1965,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
         availabilityFromOptions = service.advOptions()['availabilityFrom']?.options ?? [];
         namedAvailabilityFromOptions = availabilityFromOptions.filter((option): option is { name: string; available?: boolean } => typeof option !== 'number');
 
-        expect(namedAvailabilityFromOptions.find((option) => option.name === 'Production')).toEqual(jasmine.objectContaining({ available: false }));
+        expect(namedAvailabilityFromOptions.find((option) => option.name === 'Requisition')).toEqual(jasmine.objectContaining({ available: false }));
         expect(namedAvailabilityFromOptions.find((option) => option.name === 'Salvage')).toEqual(jasmine.objectContaining({ available: true }));
     });
 
@@ -1440,11 +2029,11 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '3131': {
-                        '1': [2, 2],
+                        '1': [15, 15],
                     },
                     '3151': {
-                        '1': [2, 2],
-                        '2': [7, 0],
+                        '1': [15, 15],
+                        '2': [65, 0],
                     },
                 },
             },
@@ -1482,7 +2071,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
         expect(namedRarityOptions.find((option) => option.name === 'Common')).toEqual(jasmine.objectContaining({ available: false }));
         expect(namedRarityOptions.find((option) => option.name === 'Very Rare')).toEqual(jasmine.objectContaining({ available: true }));
 
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
 
         rarityOptions = service.advOptions()['availabilityRarity']?.options ?? [];
         namedRarityOptions = rarityOptions.filter((option): option is { name: string; available?: boolean } => typeof option !== 'number');
@@ -1559,11 +2148,11 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '3131': {
-                        '1': [2, 2],
+                        '1': [15, 15],
                     },
                     '3151': {
-                        '1': [2, 2],
-                        '2': [7, 0],
+                        '1': [15, 15],
+                        '2': [65, 0],
                     },
                 },
             },
@@ -1598,7 +2187,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
 
         expect(service.filteredUnits().map((unit) => unit.name)).toEqual(['BattleMaster C3']);
 
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
 
         expect(service.filteredUnits().map((unit) => unit.name)).toEqual(['BattleMaster C3']);
 
@@ -1675,11 +2264,11 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '3131': {
-                        '1': [2, 2],
+                        '1': [15, 15],
                     },
                     '3151': {
-                        '1': [2, 2],
-                        '2': [7, 0],
+                        '1': [15, 15],
+                        '2': [65, 0],
                     },
                 },
             },
@@ -1703,24 +2292,24 @@ describe('UnitSearchFiltersService search telemetry', () => {
 
         service.setFilter('era', ['Dark Age']);
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 2, rarity: 'Very Rare' },
-            { source: 'Salvage', score: 2, rarity: 'Very Rare' },
+            { source: 'Requisition', score: 15, rarity: 'Very Rare' },
+            { source: 'Salvage', score: 15, rarity: 'Very Rare' },
         ]);
 
         service.setFilter('era', ['ilClan']);
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 7, rarity: 'Common' },
-            { source: 'Salvage', score: 2, rarity: 'Very Rare' },
+            { source: 'Requisition', score: 65, rarity: 'Common' },
+            { source: 'Salvage', score: 15, rarity: 'Very Rare' },
         ]);
 
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 7, rarity: 'Common' },
+            { source: 'Requisition', score: 65, rarity: 'Common' },
         ]);
 
         service.setFilter('faction', rasalhagueDominion);
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 2, rarity: 'Very Rare' },
+            { source: 'Requisition', score: 15, rarity: 'Very Rare' },
         ]);
     });
 
@@ -1793,13 +2382,13 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '3131': {
-                        '40': [2, 0],
-                        '82': [0, 1],
-                        '100': [7, 0],
+                        '40': [15, 0],
+                        '82': [0, 5],
+                        '100': [65, 0],
                     },
                     '3151': {
-                        '40': [2, 0],
-                        '100': [7, 0],
+                        '40': [15, 0],
+                        '100': [65, 0],
                     },
                 },
             },
@@ -1812,8 +2401,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
         service.setFilter('era', ['Dark Age']);
 
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 2, rarity: 'Very Rare' },
-            { source: 'Salvage', score: 1, rarity: 'Very Rare' },
+            { source: 'Requisition', score: 15, rarity: 'Very Rare' },
+            { source: 'Salvage', score: 5, rarity: 'Very Rare' },
         ]);
 
         let rarityOptions = service.advOptions()['availabilityRarity']?.options ?? [];
@@ -1892,8 +2481,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '3151': {
-                        '40': [2, 0],
-                        '100': [7, 0],
+                        '40': [15, 0],
+                        '100': [65, 0],
                     },
                 },
             },
@@ -1909,9 +2498,9 @@ describe('UnitSearchFiltersService search telemetry', () => {
         let namedAvailabilityFromOptions = availabilityFromOptions.filter((option): option is { name: string; available?: boolean } => typeof option !== 'number');
 
         expect(namedAvailabilityFromOptions.find((option) => option.name === 'Unknown')).toEqual(jasmine.objectContaining({ available: true }));
-        expect(namedAvailabilityFromOptions.find((option) => option.name === 'Production')).toEqual(jasmine.objectContaining({ available: true }));
+        expect(namedAvailabilityFromOptions.find((option) => option.name === 'Requisition')).toEqual(jasmine.objectContaining({ available: true }));
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 7, rarity: 'Common' },
+            { source: 'Requisition', score: 65, rarity: 'Common' },
         ]);
 
         service.setFilter('availabilityFrom', ['Unknown']);
@@ -2024,8 +2613,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '3151': {
-                        '40': [2, 1],
-                        '100': [7, 1],
+                        '40': [15, 5],
+                        '100': [65, 5],
                     },
                 },
             },
@@ -2036,14 +2625,14 @@ describe('UnitSearchFiltersService search telemetry', () => {
 
         service.searchText.set('BattleMaster');
         service.setFilter('era', ['ilClan']);
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
         service.setFilter('availabilityRarity', ['Very Rare']);
 
         expect(service.filteredUnits().map((unit) => unit.name)).toEqual(['BattleMaster C3']);
         expect(service.getMegaMekAvailabilityBadges(bundle.units.units[0])).toEqual([
-            { source: 'Production', score: 2, rarity: 'Very Rare' },
+            { source: 'Requisition', score: 15, rarity: 'Very Rare' },
         ]);
-        expect(service.getMegaMekRaritySortScore(bundle.units.units[0])).toBe(2);
+        expect(service.getMegaMekRaritySortScore(bundle.units.units[0])).toBe(15);
     });
 
     it('keeps units without MegaMek availability data visible by default but excludes them when an availability filter is applied', () => {
@@ -2090,7 +2679,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // m: bundle.units.units[0].model,
                 e: {
                     '9': {
-                        '60': [6.6, 0],
+                        '60': [61, 0],
                     },
                 },
             },
@@ -2119,8 +2708,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
 
     it('filters MegaMek units by Available From from the UI', () => {
         const bundle = createStandaloneBundle();
-        bundle.units.units[0].name = 'Production Unit';
-        bundle.units.units[0].chassis = 'Production Unit';
+        bundle.units.units[0].name = 'Requisition Unit';
+        bundle.units.units[0].chassis = 'Requisition Unit';
         bundle.units.units[0].model = 'PROD-1';
         bundle.units.units[1].name = 'Salvage Unit';
         bundle.units.units[1].chassis = 'Salvage Unit';
@@ -2131,10 +2720,10 @@ describe('UnitSearchFiltersService search telemetry', () => {
         const { dataService, service, optionsServiceStub } = createService(bundle);
         spyOn(dataService, 'getMegaMekAvailabilityRecords').and.returnValue([
             {
-                n: 'Production Unit',
+                n: 'Requisition Unit',
                 e: {
                     '1': {
-                        '1': [5, 0],
+                        '1': [45, 0],
                     },
                 },
             },
@@ -2142,7 +2731,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Salvage Unit',
                 e: {
                     '1': {
-                        '1': [0, 3],
+                        '1': [0, 25],
                     },
                 },
             },
@@ -2156,9 +2745,9 @@ describe('UnitSearchFiltersService search telemetry', () => {
             availabilitySource: 'megamek',
         });
 
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
 
-        expect(service.filteredUnits().map((unit) => unit.name)).toEqual(['Production Unit']);
+        expect(service.filteredUnits().map((unit) => unit.name)).toEqual(['Requisition Unit']);
 
         service.setFilter('availabilityFrom', ['Salvage']);
 
@@ -2182,7 +2771,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Very Rare Unit',
                 e: {
                     '1': {
-                        '1': [1, 0],
+                        '1': [5, 0],
                     },
                 },
             },
@@ -2190,7 +2779,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Common Unit',
                 e: {
                     '1': {
-                        '1': [7, 0],
+                        '1': [65, 0],
                     },
                 },
             },
@@ -2229,7 +2818,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Very Common Crab',
                 e: {
                     '1': {
-                        '1': [9, 0],
+                        '1': [85, 0],
                     },
                 },
             },
@@ -2294,7 +2883,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Known Crab',
                 e: {
                     '1': {
-                        '1': [9, 0],
+                        '1': [85, 0],
                     },
                 },
             },
@@ -2356,7 +2945,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Known Unit',
                 e: {
                     '1': {
-                        '1': [9, 0],
+                        '1': [85, 0],
                     },
                 },
             },
@@ -2402,7 +2991,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: lowUnit.name,
                 e: {
                     '1': {
-                        '1': [3, 0],
+                        '1': [25, 0],
                     },
                 },
             },
@@ -2410,7 +2999,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: highUnit.name,
                 e: {
                     '1': {
-                        '1': [5, 1],
+                        '1': [45, 5],
                     },
                 },
             },
@@ -2468,7 +3057,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: bundle.units.units[0].name,
                 e: {
                     '9': {
-                        '30': [7.2, 0],
+                        '30': [67, 0],
                     },
                 },
             },
@@ -2476,7 +3065,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: bundle.units.units[1].name,
                 e: {
                     '10': {
-                        '30': [7.2, 0],
+                        '30': [67, 0],
                     },
                 },
             },
@@ -2492,6 +3081,185 @@ describe('UnitSearchFiltersService search telemetry', () => {
         service.searchText.set('era="Age of War"');
 
         expect(service.filteredUnits().map((unit) => unit.name)).toEqual(['Aquarius Escort']);
+    });
+
+    it('uses direct MegaMek membership checks for scoped era membership queries', () => {
+        const bundle = createStandaloneBundle();
+        bundle.units.units[0].name = 'Combine Scout';
+        bundle.units.units[0].chassis = 'Combine Scout';
+        bundle.units.units[0].model = 'CS-1';
+        bundle.units.units[1].name = 'Suns Raider';
+        bundle.units.units[1].chassis = 'Suns Raider';
+        bundle.units.units[1].model = 'SR-1';
+        bundle.eras.eras = [{
+            id: 1,
+            name: 'Age of War',
+            img: '',
+            years: {
+                from: 2005,
+                to: 2570,
+            },
+            units: [1, 2],
+            factions: [],
+        }];
+        bundle.factions.factions = [
+            {
+                id: 30,
+                name: 'Draconis Combine',
+                group: 'Inner Sphere',
+                img: '',
+                eras: {
+                    1: new Set([1]),
+                },
+            },
+            {
+                id: 31,
+                name: 'Federated Suns',
+                group: 'Inner Sphere',
+                img: '',
+                eras: {
+                    1: new Set([2]),
+                },
+            },
+        ];
+
+        const { dataService, service, optionsServiceStub } = createService(bundle);
+        const unitAvailabilitySource = TestBed.inject(UnitAvailabilitySourceService);
+        spyOn(dataService, 'getMegaMekAvailabilityRecords').and.returnValue([
+            {
+                n: bundle.units.units[0].name,
+                e: {
+                    '1': {
+                        '30': [55, 0],
+                    },
+                },
+            },
+            {
+                n: bundle.units.units[1].name,
+                e: {
+                    '1': {
+                        '31': [45, 0],
+                    },
+                },
+            },
+        ]);
+        spyOn(dataService, 'getMegaMekAvailabilityRecordForUnit').and.callFake((unit: Pick<Unit, 'name'>) => {
+            return dataService.getMegaMekAvailabilityRecords().find((record) => record.n === unit.name);
+        });
+
+        optionsServiceStub.options.set({
+            ...optionsServiceStub.options(),
+            availabilitySource: 'megamek',
+        });
+
+        const directMembershipSpy = spyOn(unitAvailabilitySource, 'unitMatchesMegaMekMembership').and.callThrough();
+        const scopedSetSpy = spyOn(unitAvailabilitySource, 'getMegaMekMembershipUnitIds').and.callThrough();
+
+        expect(service.unitBelongsToEra(bundle.units.units[0], 'Age of War', { factionNames: ['Draconis Combine'] })).toBeTrue();
+        expect(service.unitBelongsToEra(bundle.units.units[0], 'Age of War', { factionNames: ['Federated Suns'] })).toBeFalse();
+        expect(service.unitBelongsToEra(bundle.units.units[1], 'Age of War', { factionNames: ['Federated Suns'] })).toBeTrue();
+        expect(directMembershipSpy).toHaveBeenCalledTimes(3);
+        expect(scopedSetSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns scoped MegaMek indexed unit ids for semantic era and faction lookups', () => {
+        const bundle = createStandaloneBundle();
+        bundle.units.units[0].name = 'Combine Scout';
+        bundle.units.units[0].chassis = 'Combine Scout';
+        bundle.units.units[0].model = 'CS-1';
+        bundle.units.units[1].name = 'Suns Raider';
+        bundle.units.units[1].chassis = 'Suns Raider';
+        bundle.units.units[1].model = 'SR-1';
+        bundle.eras.eras = [
+            {
+                id: 1,
+                name: 'Age of War',
+                img: '',
+                years: {
+                    from: 2005,
+                    to: 2570,
+                },
+                units: [1, 2],
+                factions: [],
+            },
+            {
+                id: 2,
+                name: 'Succession Wars',
+                img: '',
+                years: {
+                    from: 2781,
+                    to: 3049,
+                },
+                units: [1, 2],
+                factions: [],
+            },
+        ];
+        bundle.factions.factions = [
+            {
+                id: 30,
+                name: 'Draconis Combine',
+                group: 'Inner Sphere',
+                img: '',
+                eras: {
+                    1: new Set([1]),
+                    2: new Set([1]),
+                },
+            },
+            {
+                id: 31,
+                name: 'Federated Suns',
+                group: 'Inner Sphere',
+                img: '',
+                eras: {
+                    1: new Set([2]),
+                    2: new Set([2]),
+                },
+            },
+        ];
+
+        const { dataService, service, optionsServiceStub } = createService(bundle);
+        spyOn(dataService, 'getMegaMekAvailabilityRecords').and.returnValue([
+            {
+                n: bundle.units.units[0].name,
+                e: {
+                    '1': {
+                        '30': [55, 0],
+                    },
+                    '2': {
+                        '30': [45, 0],
+                    },
+                },
+            },
+            {
+                n: bundle.units.units[1].name,
+                e: {
+                    '1': {
+                        '31': [35, 0],
+                    },
+                },
+            },
+        ]);
+        spyOn(dataService, 'getMegaMekAvailabilityRecordForUnit').and.callFake((unit: Pick<Unit, 'name'>) => {
+            return dataService.getMegaMekAvailabilityRecords().find((record) => record.n === unit.name);
+        });
+
+        optionsServiceStub.options.set({
+            ...optionsServiceStub.options(),
+            availabilitySource: 'megamek',
+        });
+
+        expect(Array.from((service as any).getSemanticIndexedUnitIds('era', 'Age of War', {
+            factionNames: ['Draconis Combine'],
+        }) ?? [])).toEqual(['Combine Scout']);
+        expect(Array.from((service as any).getSemanticIndexedUnitIds('era', 'Age of War', {
+            factionNames: ['Federated Suns'],
+        }) ?? [])).toEqual(['Suns Raider']);
+        expect(Array.from((service as any).getSemanticIndexedUnitIds('faction', 'Draconis Combine', {
+            eraNames: ['Age of War'],
+        }) ?? [])).toEqual(['Combine Scout']);
+        expect(Array.from((service as any).getSemanticIndexedUnitIds('faction', 'Federated Suns', {
+            eraNames: ['Succession Wars'],
+        }) ?? [])).toEqual([]);
     });
 
     it('marks the MegaMek Extinct faction as available when extinct units exist', () => {
@@ -2562,15 +3330,15 @@ describe('UnitSearchFiltersService search telemetry', () => {
             {
                 n: bundle.units.units[0].name,
                 e: {
-                    '1': { '30': [6, 0] },
-                    '2': { '30': [5, 0] },
-                    '4': { '30': [4, 0] },
+                    '1': { '30': [55, 0] },
+                    '2': { '30': [45, 0] },
+                    '4': { '30': [35, 0] },
                 },
             },
             {
                 n: bundle.units.units[1].name,
                 e: {
-                    '4': { '30': [4, 0] },
+                    '4': { '30': [35, 0] },
                 },
             },
         ]);
@@ -2657,15 +3425,15 @@ describe('UnitSearchFiltersService search telemetry', () => {
             {
                 n: bundle.units.units[0].name,
                 e: {
-                    '1': { '30': [6, 0] },
-                    '2': { '30': [5, 0] },
-                    '4': { '30': [4, 0] },
+                    '1': { '30': [55, 0] },
+                    '2': { '30': [45, 0] },
+                    '4': { '30': [35, 0] },
                 },
             },
             {
                 n: bundle.units.units[1].name,
                 e: {
-                    '4': { '30': [4, 0] },
+                    '4': { '30': [35, 0] },
                 },
             },
         ]);
@@ -2716,7 +3484,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 // m: bundle.units.units[0].model,
                 e: {
                     '1': {
-                        '1': [6, 0],
+                        '1': [55, 0],
                     },
                 },
             },
@@ -2731,7 +3499,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
             ...optionsServiceStub.options(),
             availabilitySource: 'megamek',
         });
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
         service.searchText.set('Test');
         service.filteredUnits();
 
@@ -2751,7 +3519,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
 
         const executeMessage = worker.messages.filter((message: any) => message.type === 'execute').at(-1) as any;
         expect(executeMessage).toBeTruthy();
-        expect(executeMessage.request.executionQuery).not.toContain('from=Production');
+        expect(executeMessage.request.executionQuery).not.toContain('from=Requisition');
 
         worker.emit({
             type: 'result',
@@ -2839,11 +3607,11 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '1': {
-                        '1': [4, 0],
-                        '2': [7, 0],
+                        '1': [35, 0],
+                        '2': [65, 0],
                     },
                     '2': {
-                        '1': [7, 0],
+                        '1': [65, 0],
                     },
                 },
             },
@@ -2851,7 +3619,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Common Dominion Mek',
                 e: {
                     '1': {
-                        '1': [7, 0],
+                        '1': [65, 0],
                     },
                 },
             },
@@ -2986,8 +3754,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '1': {
-                        '1': [2, 0],
-                        '2': [7, 0],
+                        '1': [15, 0],
+                        '2': [65, 0],
                     },
                 },
             },
@@ -3049,8 +3817,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
         bundle.units.units[0].name = 'Rare Salvage Crab';
         bundle.units.units[0].chassis = 'Rare Salvage Crab';
         bundle.units.units[0].model = 'RSC-1';
-        bundle.units.units[1].name = 'Common Production Crab';
-        bundle.units.units[1].chassis = 'Common Production Crab';
+        bundle.units.units[1].name = 'Common Requisition Crab';
+        bundle.units.units[1].chassis = 'Common Requisition Crab';
         bundle.units.units[1].model = 'CPC-1';
         bundle.eras.eras[0].units = [1, 2];
         bundle.factions.factions[0].eras[1] = new Set([1, 2]);
@@ -3063,15 +3831,15 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Rare Salvage Crab',
                 e: {
                     '1': {
-                        '1': [0, 4],
+                        '1': [0, 35],
                     },
                 },
             },
             {
-                n: 'Common Production Crab',
+                n: 'Common Requisition Crab',
                 e: {
                     '1': {
-                        '1': [7, 0],
+                        '1': [65, 0],
                     },
                 },
             },
@@ -3111,7 +3879,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
             revision: executeMessage.request.revision,
             corpusVersion: executeMessage.request.corpusVersion,
             telemetryQuery: executeMessage.request.telemetryQuery,
-            unitNames: ['Rare Salvage Crab', 'Common Production Crab'],
+            unitNames: ['Rare Salvage Crab', 'Common Requisition Crab'],
             stages: [],
             totalMs: 1,
             unitCount: bundle.units.units.length,
@@ -3178,8 +3946,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '1': {
-                        '1': [4, 0],
-                        '2': [7, 0],
+                        '1': [35, 0],
+                        '2': [65, 0],
                     },
                 },
             },
@@ -3187,7 +3955,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Common Dominion Mek',
                 e: {
                     '1': {
-                        '1': [7, 0],
+                        '1': [65, 0],
                     },
                 },
             },
@@ -3292,8 +4060,8 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'BattleMaster C3',
                 e: {
                     '1': {
-                        '1': [4, 0],
-                        '2': [7, 0],
+                        '1': [35, 0],
+                        '2': [65, 0],
                     },
                 },
             },
@@ -3375,7 +4143,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Very Common Crab',
                 e: {
                     '1': {
-                        '1': [9, 0],
+                        '1': [85, 0],
                     },
                 },
             },
@@ -3442,7 +4210,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Rare Salvage Crab',
                 e: {
                     '1': {
-                        '1': [0, 4],
+                        '1': [0, 35],
                     },
                 },
             },
@@ -3450,7 +4218,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Common Salvage Crab',
                 e: {
                     '1': {
-                        '1': [0, 7],
+                        '1': [0, 65],
                     },
                 },
             },
@@ -3503,7 +4271,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Known Unit',
                 e: {
                     '1': {
-                        '1': [9, 0],
+                        '1': [85, 0],
                     },
                 },
             },
@@ -3564,7 +4332,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
             ...optionsServiceStub.options(),
             availabilitySource: 'megamek',
         });
-        service.searchText.set('Test OR from=Production');
+        service.searchText.set('Test OR from=Requisition');
         service.filteredUnits();
 
         expect((service as any).workerSearchActive()).toBeFalse();
@@ -3590,7 +4358,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: 'Very Common Crab',
                 e: {
                     '1': {
-                        '1': [9, 0],
+                        '1': [85, 0],
                     },
                 },
             },
@@ -3638,7 +4406,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: lowUnit.name,
                 e: {
                     '1': {
-                        '1': [3, 0],
+                        '1': [25, 0],
                     },
                 },
             },
@@ -3646,7 +4414,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 n: highUnit.name,
                 e: {
                     '1': {
-                        '1': [5, 1],
+                        '1': [45, 5],
                     },
                 },
             },
@@ -3746,6 +4514,76 @@ describe('UnitSearchFiltersService search telemetry', () => {
         expect(dragoons).toEqual(jasmine.objectContaining({ name: "Wolf's Dragoons", available: true }));
         expect(mercenary).toEqual(jasmine.objectContaining({ name: 'Mercenary', available: true }));
         expect(clanWolf).toEqual(jasmine.objectContaining({ name: 'Clan Wolf', available: false }));
+    });
+
+    it('keeps MegaMek faction self and co-matches available for multistate AND selections', () => {
+        const bundle = createStandaloneBundle();
+        bundle.factions.factions = [
+            {
+                id: 1,
+                name: 'Free Worlds League',
+                group: 'Inner Sphere',
+                img: '',
+                eras: { 1: new Set([1]) },
+            },
+            {
+                id: 2,
+                name: 'Mercenary',
+                group: 'Mercenary',
+                img: '',
+                eras: { 1: new Set([1]) },
+            },
+            {
+                id: 3,
+                name: 'Draconis Combine',
+                group: 'Inner Sphere',
+                img: '',
+                eras: { 1: new Set([2]) },
+            },
+        ];
+
+        const { dataService, service, optionsServiceStub } = createService(bundle);
+        spyOn(dataService, 'getMegaMekAvailabilityRecords').and.returnValue([
+            {
+                n: bundle.units.units[0].name,
+                e: {
+                    '1': {
+                        '1': [45, 0],
+                        '2': [45, 0],
+                    },
+                },
+            },
+            {
+                n: bundle.units.units[1].name,
+                e: {
+                    '1': {
+                        '3': [45, 0],
+                    },
+                },
+            },
+        ]);
+        spyOn(dataService, 'getMegaMekAvailabilityRecordForUnit').and.callFake((unit: Pick<Unit, 'name'>) => {
+            return dataService.getMegaMekAvailabilityRecords().find((record) => record.n === unit.name);
+        });
+
+        optionsServiceStub.options.set({
+            ...optionsServiceStub.options(),
+            availabilitySource: 'megamek',
+        });
+        service.setFilter('faction', {
+            'Free Worlds League': {
+                name: 'Free Worlds League',
+                state: 'and',
+                count: 1,
+            },
+        });
+
+        const factionOptions = service.advOptions()['faction']?.options ?? [];
+        const namedFactionOptions = factionOptions.filter((option): option is { name: string; available?: boolean } => typeof option !== 'number');
+
+        expect(namedFactionOptions.find((option) => option.name === 'Free Worlds League')).toEqual(jasmine.objectContaining({ available: true }));
+        expect(namedFactionOptions.find((option) => option.name === 'Mercenary')).toEqual(jasmine.objectContaining({ available: true }));
+        expect(namedFactionOptions.find((option) => option.name === 'Draconis Combine')).toEqual(jasmine.objectContaining({ available: false }));
     });
 
     it('keeps indexed source self and co-matches available for multistate AND selections', () => {
@@ -4211,7 +5049,7 @@ describe('UnitSearchFiltersService search telemetry', () => {
                 count: 1,
             },
         });
-        service.setFilter('availabilityFrom', ['Production']);
+        service.setFilter('availabilityFrom', ['Requisition']);
         service.setFilter('availabilityRarity', ['Common']);
 
         const request = (service as any).buildWorkerSearchRequest((service as any).getWorkerCorpusVersion());

@@ -32,7 +32,7 @@
  */
 
 import { Injectable, signal, Injector, inject, DestroyRef } from '@angular/core';
-import type { Unit } from '../models/units.model';
+import type { Unit, UnitFluffCatalogEntry } from '../models/units.model';
 import type { Faction, FactionId } from '../models/factions.model';
 import type { Era } from '../models/eras.model';
 import { DbService, type TagData } from './db.service';
@@ -44,7 +44,7 @@ import type { Quirk } from '../models/quirks.model';
 import { generateUUID, WsService } from './ws.service';
 import type { ForceUnit } from '../models/force-unit.model';
 import type { Force }    from '../models/force.model';
-import type { ASSerializedForce, CBTSerializedForce, SerializedForce } from '../models/force-serialization';
+import { sanitizeForceTags, type ASSerializedForce, type CBTSerializedForce, type SerializedForce } from '../models/force-serialization';
 import { UnitInitializerService } from './unit-initializer.service';
 import { UserStateService } from './userState.service';
 import {
@@ -61,25 +61,28 @@ import { GameSystem } from '../models/common.model';
 import { CBTForce } from '../models/cbt-force.model';
 import { ASForce } from '../models/as-force.model';
 import type { Sourcebook } from '../models/sourcebook.model';
+import type { SarnaLookupUnit } from '../models/sarna-page-titles.model';
 import type { MegaMekFactionAffiliation, MegaMekFactionRecord, MegaMekFactions } from '../models/megamek/factions.model';
 import type { MegaMekWeightedAvailabilityRecord } from '../models/megamek/availability.model';
 import type { MegaMekRulesetRecord } from '../models/megamek/rulesets.model';
 import { getForcePacks } from '../models/forcepacks.model';
-import { getForcePackLookupKey } from '../utils/force-pack.util';
 import type { UnitSearchWorkerFactionEraSnapshot, UnitSearchWorkerIndexSnapshot } from '../utils/unit-search-worker-protocol.util';
 import { MegaMekAvailabilityCatalogService } from './catalogs/megamek-availability-catalog.service';
 import { MegaMekFactionsCatalogService } from './catalogs/megamek-factions-catalog.service';
 import { MegaMekRulesetsCatalogService } from './catalogs/megamek-rulesets-catalog.service';
 import { ErasCatalogService } from './catalogs/eras-catalog.service';
 import { FactionsCatalogService } from './catalogs/mulfactions-catalog.service';
-import { MulUnitSourcesCatalogService } from './catalogs/mul-unit-sources-catalog.service';
 import { QuirksCatalogService } from './catalogs/quirks-catalog.service';
+import { SarnaPageTitlesCatalogService } from './catalogs/sarna-page-titles-catalog.service';
 import { SourcebooksCatalogService } from './catalogs/sourcebooks-catalog.service';
 import { UnitSearchIndexService } from './unit-search-index.service';
 import { UnitRuntimeService } from './unit-runtime.service';
 import { UnitsCatalogService } from './catalogs/units-catalog.service';
+import { UnitsFluffCatalogService } from './catalogs/units-fluff-catalog.service';
 import { EquipmentCatalogService } from './catalogs/equipment-catalog.service';
 import { MULFACTION_EXTINCT } from '../models/mulfactions.model';
+import { naturalCompare } from '../utils/sort.util';
+import { getUnitVariantGroupKey } from '../utils/unit-variant.util';
 
 /*
  * Author: Drake
@@ -164,19 +167,21 @@ export class DataService {
     private unitSearchIndexService = inject(UnitSearchIndexService);
     private unitRuntimeService = inject(UnitRuntimeService);
     private unitsCatalog = inject(UnitsCatalogService);
+    private unitsFluffCatalog = inject(UnitsFluffCatalogService);
     private equipmentCatalog = inject(EquipmentCatalogService);
     private erasCatalog = inject(ErasCatalogService);
     private factionsCatalog = inject(FactionsCatalogService);
     private megaMekAvailabilityCatalog = inject(MegaMekAvailabilityCatalogService);
     private megaMekFactionsCatalog = inject(MegaMekFactionsCatalogService);
     private megaMekRulesetsCatalog = inject(MegaMekRulesetsCatalogService);
-    private mulUnitSourcesCatalog = inject(MulUnitSourcesCatalogService);
     private quirksCatalog = inject(QuirksCatalogService);
+    private sarnaPageTitlesCatalog = inject(SarnaPageTitlesCatalogService);
     private sourcebooksCatalog = inject(SourcebooksCatalogService);
     private readonly megaMekAvailabilityCatalogState = createCatalogInitializationState();
     private readonly megaMekFactionsCatalogState = createCatalogInitializationState();
     private readonly megaMekRulesetsCatalogState = createCatalogInitializationState();
     private readonly quirksCatalogState = createCatalogInitializationState();
+    private readonly sarnaPageTitlesCatalogState = createCatalogInitializationState();
     private readonly sourcebooksCatalogState = createCatalogInitializationState();
 
     isDataReady = signal(false);
@@ -186,14 +191,16 @@ export class DataService {
     /** Emits when a cloud save is rejected (not_owner) and the force needs adoption. */
     public forceNeedsAdoption = new Subject<Force>();
 
-    /** packName -> Set<chassis|type|subtype> for force pack membership checks */
+    /** packName -> Set<chassis|as.TP|omni> for force pack membership checks */
     private forcePackToLookupKey: Map<string, Set<string>> | null = null;
-    /** chassis|type|subtype -> sorted pack names[] for reverse lookups */
+    /** chassis|as.TP|omni -> sorted pack names[] for reverse lookups */
     private lookupKeyToForcePacks: Map<string, string[]> | null = null;
+    private cachedForceTagsByInstanceId = new Map<string, string[]>();
 
     public tagsVersion = signal(0);
     public searchCorpusVersion = signal(0);
     public megaMekAvailabilityVersion = signal(0);
+    public sarnaPageTitlesVersion = signal(0);
 
 
     constructor() {
@@ -252,11 +259,11 @@ export class DataService {
         }
 
         // Wire up TagsService callbacks
-        this.tagsService.setRefreshUnitsCallback((tagData) => {
-            this.applyTagDataToUnits(tagData);
+        this.tagsService.setRefreshUnitsCallback((tagData, options) => {
+            this.applyTagDataToUnits(tagData, options);
         });
-        this.tagsService.setNotifyStoreUpdatedCallback(() => {
-            this.notifyStoreUpdated('update', 'tags');
+        this.tagsService.setNotifyStoreUpdatedCallback((options) => {
+            this.notifyStoreUpdated('update', 'tags', options);
         });
 
         // Register WS message handlers for tag sync (handled by TagsService)
@@ -280,9 +287,12 @@ export class DataService {
      * 
      * V3 format: tags = { tagId: { label, units: {unitName: {}}, chassis: {chassisKey: {}} } }
      */
-    private applyTagDataToUnits(tagData: TagData | null): void {
-        this.unitRuntimeService.applyTagDataToUnits(this.getUnits(), tagData);
-        this.tagsVersion.set(this.tagsVersion() + 1);
+    private applyTagDataToUnits(tagData: TagData | null, options?: { searchIndexChanged?: boolean }): void {
+        const searchIndexChanged = options?.searchIndexChanged ?? true;
+        this.unitRuntimeService.applyTagDataToUnits(this.getUnits(), tagData, { rebuildTagSearchIndex: searchIndexChanged });
+        if (searchIndexChanged) {
+            this.tagsVersion.set(this.tagsVersion() + 1);
+        }
     }
 
     /**
@@ -310,7 +320,7 @@ export class DataService {
             if (action === 'update' && context === 'tags') {
                 // Reload tag data from TagsService and apply to units
                 const tagData = await this.tagsService.getTagData();
-                this.applyTagDataToUnits(tagData);
+                this.applyTagDataToUnits(tagData, msg.meta);
             }
         } catch (err) {
             this.logger.error('Error handling store update broadcast: ' + err);
@@ -332,6 +342,10 @@ export class DataService {
 
     public getUnitByName(name: string): Unit | undefined {
         return this.unitRuntimeService.getUnitByName(name);
+    }
+
+    public getUnitFluff(unit: Pick<Unit, 'name' | 'fluff'>): Promise<UnitFluffCatalogEntry | undefined> {
+        return this.unitsFluffCatalog.getUnitFluff(unit);
     }
 
     public getEquipments(): EquipmentMap {
@@ -382,6 +396,10 @@ export class DataService {
         return this.sourcebooksCatalog.getSourcebookTitle(abbrev);
     }
 
+    public getSarnaPageTitleForUnit(unit: SarnaLookupUnit | null | undefined): string | undefined {
+        return this.sarnaPageTitlesCatalog.getPageTitleForUnit(unit);
+    }
+
     public getMegaMekFactions(): MegaMekFactions {
         return this.megaMekFactionsCatalog.getFactions();
     }
@@ -416,21 +434,16 @@ export class DataService {
         return this.megaMekAvailabilityCatalog.getRecordForUnit(unit);
     }
 
-    /**
-     * Get the sourcebook abbreviations for a unit by its MUL ID.
-     * @param mulId The Master Unit List ID of the unit
-     * @returns Array of sourcebook abbreviations, or undefined if not found
-     */
-    public getUnitSourcesByMulId(mulId: number): string[] | undefined {
-        return this.mulUnitSourcesCatalog.getUnitSourcesByMulId(mulId);
-    }
-
     private bumpSearchCorpusVersion(): void {
         this.searchCorpusVersion.update(version => version + 1);
     }
 
     private bumpMegaMekAvailabilityVersion(): void {
         this.megaMekAvailabilityVersion.update(version => version + 1);
+    }
+
+    private bumpSarnaPageTitlesVersion(): void {
+        this.sarnaPageTitlesVersion.update(version => version + 1);
     }
 
     private invalidateForcePackCaches(): void {
@@ -497,7 +510,6 @@ export class DataService {
             await Promise.all([
                 this.unitsCatalog.initialize(),
                 this.equipmentCatalog.initialize(),
-                this.mulUnitSourcesCatalog.initialize(),
                 this.erasCatalog.initialize(),
                 this.factionsCatalog.initialize(),
             ]);
@@ -579,10 +591,20 @@ export class DataService {
         );
     }
 
+    private ensureSarnaPageTitlesCatalogInitialized(): Promise<boolean> {
+        return this.ensureCatalogInitialized(
+            this.sarnaPageTitlesCatalogState,
+            'sarna_page_titles',
+            () => this.sarnaPageTitlesCatalog.initialize(),
+            () => this.bumpSarnaPageTitlesVersion(),
+        );
+    }
+
     private initializeStartupCatalogs(): Promise<boolean> {
         return this.ensureCatalogGroupInitialized([
             { name: 'megamek_availability', ensure: () => this.ensureMegaMekAvailabilityCatalogInitialized() },
             { name: 'quirks', ensure: () => this.ensureQuirksCatalogInitialized() },
+            { name: 'sarna_page_titles', ensure: () => this.ensureSarnaPageTitlesCatalogInitialized() },
             { name: 'sourcebooks', ensure: () => this.ensureSourcebooksCatalogInitialized() },
         ]);
     }
@@ -735,6 +757,59 @@ export class DataService {
         }
     }
 
+    public async updateForceTags(instanceId: string, tags: readonly string[], updateCloud: boolean = true): Promise<string[]> {
+        const normalizedTags = sanitizeForceTags(tags);
+        const updatedLocalForce = await this.dbService.updateForceTags(instanceId, normalizedTags);
+        let updated = updatedLocalForce !== null;
+
+        if (updateCloud) {
+            updated = (await this.updateForceTagsCloud(instanceId, normalizedTags)) || updated;
+        }
+
+        if (!updated) {
+            throw new Error('The selected force could not be updated.');
+        }
+
+        this.updateCachedForceTags(instanceId, normalizedTags);
+        return normalizedTags;
+    }
+
+    public getCachedForceTagLabels(): string[] {
+        const labels = new Map<string, string>();
+        for (const tags of this.cachedForceTagsByInstanceId.values()) {
+            for (const tag of tags) {
+                const key = tag.toLocaleLowerCase();
+                if (!labels.has(key)) {
+                    labels.set(key, tag);
+                }
+            }
+        }
+
+        return Array.from(labels.values())
+            .sort(naturalCompare);
+    }
+
+    public updateCachedForceTags(instanceId: string, tags: readonly string[] | null | undefined): void {
+        if (!instanceId) {
+            return;
+        }
+
+        this.cachedForceTagsByInstanceId.set(instanceId, sanitizeForceTags(tags ?? []));
+    }
+
+    private refreshCachedForceTags(forces: readonly Pick<LoadForceEntry, 'instanceId' | 'tags'>[]): void {
+        const nextCache = new Map<string, string[]>();
+        for (const force of forces) {
+            if (!force.instanceId) {
+                continue;
+            }
+
+            nextCache.set(force.instanceId, sanitizeForceTags(force.tags ?? []));
+        }
+
+        this.cachedForceTagsByInstanceId = nextCache;
+    }
+
 
 
     public async saveSerializedForceToLocalStorage(serialized: SerializedForce): Promise<void> {
@@ -771,6 +846,7 @@ export class DataService {
             }
         }
         const mergedForces = Array.from(forceMap.values()).sort((a, b) => getTimestamp(b) - getTimestamp(a));
+        this.refreshCachedForceTags(mergedForces);
         this.logger.info(`Found ${mergedForces.length} unique forces.`);
         return mergedForces;
     }
@@ -1433,6 +1509,42 @@ export class DataService {
         });
     }
 
+    private async updateForceTagsCloud(instanceId: string, tags: readonly string[]): Promise<boolean> {
+        const ws = await this.canUseCloud();
+        if (!ws) {
+            return false;
+        }
+
+        try {
+            const uuid = this.userStateService.uuid();
+            const response = await this.wsService.sendAndWaitForResponse({
+                action: 'setForceTags',
+                uuid,
+                instanceId,
+                tags,
+            });
+
+            if (!response) {
+                return false;
+            }
+
+            if (response.code === 'not_owner') {
+                this.logger.warn(`Cannot update force tags in cloud for ${instanceId}: not the owner.`);
+                return false;
+            }
+
+            if (response.action === 'error') {
+                this.logger.error(`Failed to update force tags in cloud for ${instanceId}: ${response.message ?? 'unknown error'}`);
+                return false;
+            }
+
+            return response.action === 'forceTagsUpdated';
+        } catch (err) {
+            this.logger.error(`Failed to update force tags in cloud for ${instanceId}: ${err}`);
+            return false;
+        }
+    }
+
     // Flush function performs the actual cloud save for the latest Force for a given instanceId
     private async flushSaveForceCloud(instanceId: string): Promise<void> {
         const entry = this.saveForceCloudDebounce.get(instanceId);
@@ -1549,8 +1661,8 @@ export class DataService {
 
     /**
      * Build both force pack lookup maps on first use.
-     * - forcePackToLookupKey: packName -> Set<chassis|type|subtype>
-     * - lookupKeyToForcePacks: chassis|type|subtype -> sorted packName[]
+        * - forcePackToLookupKey: packName -> Set<chassis|as.TP|omni>
+        * - lookupKeyToForcePacks: chassis|as.TP|omni -> sorted packName[]
      */
     private buildForcePackCaches(): void {
         this.forcePackToLookupKey = new Map();
@@ -1563,7 +1675,7 @@ export class DataService {
                 for (const pu of unitList) {
                     const unit = this.getUnitByName(pu.name);
                     if (unit) {
-                        const key = getForcePackLookupKey(unit);
+                        const key = getUnitVariantGroupKey(unit);
                         lookupKeys.add(key);
                         if (!reverseMap.has(key)) reverseMap.set(key, new Set());
                         reverseMap.get(key)!.add(pack.name);
@@ -1588,17 +1700,17 @@ export class DataService {
     }
 
     /**
-     * Check if a unit belongs to a force pack (by chassis|type|subtype).
+    * Check if a unit belongs to a force pack (by variants).
      */
     public unitBelongsToForcePack(unit: Unit, packName: string): boolean {
         if (!this.forcePackToLookupKey) this.buildForcePackCaches();
         const lookupSet = this.forcePackToLookupKey!.get(packName);
         if (!lookupSet) return false;
-        return lookupSet.has(getForcePackLookupKey(unit));
+        return lookupSet.has(getUnitVariantGroupKey(unit));
     }
 
     /**
-     * Get the chassis|type|subtype set for a force pack (for bulk filtering).
+    * Get the variants set for a force pack (for bulk filtering).
      */
     public getForcePackLookupSet(packName: string): Set<string> | undefined {
         if (!this.forcePackToLookupKey) this.buildForcePackCaches();
@@ -1606,11 +1718,11 @@ export class DataService {
     }
 
     /**
-     * Get the sorted list of force pack names that contain a unit's chassis|type|subtype.
+    * Get the sorted list of force pack names that contain a unit's variants.
      */
     public getForcePacksForUnit(unit: Unit): string[] {
         if (!this.lookupKeyToForcePacks) this.buildForcePackCaches();
-        return this.lookupKeyToForcePacks!.get(getForcePackLookupKey(unit)) ?? [];
+        return this.lookupKeyToForcePacks!.get(getUnitVariantGroupKey(unit)) ?? [];
     }
 
     /* ----------------------------------------------------------

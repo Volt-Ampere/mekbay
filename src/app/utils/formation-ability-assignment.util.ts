@@ -33,7 +33,7 @@
 
 import type { ASForceUnit } from '../models/as-force-unit.model';
 import type { UnitGroup } from '../models/force.model';
-import { FORMATION_DEFINITIONS } from './formation-definitions';
+import { getFormationDefinition } from './formation-blueprints';
 import { LanceTypeIdentifierUtil } from './lance-type-identifier.util';
 import { formationInheritsParentEffects, type FormationEffectGroup, type FormationTypeDefinition } from './formation-type.model';
 
@@ -78,6 +78,7 @@ export interface FormationAssignmentPreview {
     readonly formation: FormationTypeDefinition | null;
     readonly commanderUnitId: string | null;
     readonly requirementsFiltered: boolean;
+    readonly requirementsFilterCompositionName?: string;
     readonly requirementsFilterNotice?: string;
     readonly eligibleUnitIds: readonly string[];
     readonly assignmentsByUnitId: ReadonlyMap<string, readonly string[]>;
@@ -112,7 +113,7 @@ function getEffectAbilityIds(group: FormationEffectGroup): string[] {
 
 function getParentFormationDefinition(definition: FormationTypeDefinition): FormationTypeDefinition | null {
     return definition.parent
-        ? FORMATION_DEFINITIONS.find((candidate) => candidate.id === definition.parent) ?? null
+    ? getFormationDefinition(definition.parent)
         : null;
 }
 
@@ -532,6 +533,7 @@ export class FormationAbilityAssignmentUtil {
             formation,
             commanderUnitId,
             requirementsFiltered: filterContext.requirementsFiltered,
+            requirementsFilterCompositionName: filterContext.requirementsFilterCompositionName,
             requirementsFilterNotice: filterContext.requirementsFilterNotice,
             eligibleUnitIds: baseEligibleUnits.map((unit) => unit.id),
             assignmentsByUnitId: frozenAssignments,

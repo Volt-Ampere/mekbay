@@ -68,11 +68,13 @@ export class StatBarSpecsPipe implements PipeTransform {
         // const armorLabel = unit.armorType ? `Armor (${unit.armorType.replace(/armor/i,'').trim()})` : 'Armor';
         const armorLabel = 'Armor';
         let structureLabel;
+        let internalValue;
         if (unit.type === 'Infantry') {
             structureLabel = 'Squad size';
+            internalValue = unit.squads && unit.squads > 1 && unit.squadSize ? `${unit.squadSize}×${unit.squads}` : `${unit.internal}`;
         } else {
-            // structureLabel = unit.structureType ? `Structure (${unit.structureType.replace(/structure/i,'').trim()})` : 'Structure';
             structureLabel = 'Structure';
+            internalValue = `${unit.internal}`;
         }
         let armorValue;
         if (unit.subtype === 'Battle Armor') {
@@ -89,7 +91,7 @@ export class StatBarSpecsPipe implements PipeTransform {
         const statDefs: StatBarDefinition[] = [];
         statDefs.push(
             { key: 'armor', label: armorLabel, value: unit.armor, valueText: armorValue, max: bucketStats.armor.max, description: 'Total armor points protecting the unit from internal damage' },
-            { key: 'internal', label: structureLabel, value: unit.internal, max: bucketStats.internal.max, description: unit.type === 'Infantry' ? 'Number of soldiers in the infantry unit' : 'Internal structure points; unit is destroyed when depleted' },
+            { key: 'internal', label: structureLabel, value: unit.internal, valueText: internalValue, max: bucketStats.internal.max, description: unit.type === 'Infantry' ? 'Number of soldiers in the infantry unit' : 'Internal structure points; unit is destroyed when depleted' },
         );
 
         if (unit.capital) {
@@ -111,7 +113,7 @@ export class StatBarSpecsPipe implements PipeTransform {
             { key: 'maxRange', label: 'Range', value: unit._maxRange, valueText: maxRangeValue, max: bucketStats.maxRange.max, description: 'Maximum weapon range in hexes, and weighted maximum range for effective damage output' },
             { key: 'heat', label: 'Heat', value: unit.heat, max: bucketStats.heat.max, description: 'Maximum heat generated when firing all weapons and activating all equipment' },
             { key: 'dissipation', label: 'Dissipation', value: unit.dissipation, valueText: dissipationValue, max: bucketStats.dissipation.max, description: 'Heat dissipation capacity per turn from heat sinks. If two values are present, the first is the minimum and the second is the maximum' },
-            { key: 'runMP', label: 'Top Speed', value: unit.run2, max: bucketStats.run2MP.max, description: 'Maximum running/cruising speed in hexes per turn' },
+            { key: 'run2MP', label: 'Top Speed', value: unit.run2, max: bucketStats.run2MP.max, description: 'Maximum running/cruising speed in hexes per turn' },
             { key: 'jumpMP', label: jumpLabel, value: jumpValue, max: bucketStats.jumpMP.max, description: jumpLabel === 'VTOL' ? 'VTOL movement capability in hexes' : 'Jump movement capability in hexes' },
         );
 

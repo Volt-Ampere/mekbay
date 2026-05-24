@@ -19,12 +19,13 @@ import { FactionsCatalogService } from './catalogs/mulfactions-catalog.service';
 import { MegaMekAvailabilityCatalogService } from './catalogs/megamek-availability-catalog.service';
 import { MegaMekFactionsCatalogService } from './catalogs/megamek-factions-catalog.service';
 import { MegaMekRulesetsCatalogService } from './catalogs/megamek-rulesets-catalog.service';
-import { MulUnitSourcesCatalogService } from './catalogs/mul-unit-sources-catalog.service';
 import { QuirksCatalogService } from './catalogs/quirks-catalog.service';
+import { SarnaPageTitlesCatalogService } from './catalogs/sarna-page-titles-catalog.service';
 import { SourcebooksCatalogService } from './catalogs/sourcebooks-catalog.service';
+import { createEmptyUnit } from '../testing/unit-test-helpers';
 
 function createUnit(name: string): Unit {
-    return { name } as Unit;
+    return createEmptyUnit({ name });
 }
 
 describe('DataService', () => {
@@ -32,6 +33,7 @@ describe('DataService', () => {
     const dbServiceMock = {
         getForce: jasmine.createSpy('getForce'),
         saveForce: jasmine.createSpy('saveForce'),
+        updateForceTags: jasmine.createSpy('updateForceTags'),
         waitForDbReady: jasmine.createSpy('waitForDbReady').and.resolveTo(undefined),
     };
     const wsServiceMock = {
@@ -89,12 +91,13 @@ describe('DataService', () => {
         getRulesets: jasmine.createSpy('getRulesets').and.returnValue([]),
         getRulesetByFactionKey: jasmine.createSpy('getRulesetByFactionKey').and.returnValue(undefined),
     };
-    const mulUnitSourcesCatalogMock = {
-        initialize: jasmine.createSpy('initialize').and.resolveTo(undefined),
-    };
     const quirksCatalogMock = {
         initialize: jasmine.createSpy('initialize').and.resolveTo(undefined),
         getQuirkByName: jasmine.createSpy('getQuirkByName').and.returnValue(undefined),
+    };
+    const sarnaPageTitlesCatalogMock = {
+        initialize: jasmine.createSpy('initialize').and.resolveTo(undefined),
+        getPageTitleForUnit: jasmine.createSpy('getPageTitleForUnit').and.returnValue(undefined),
     };
     const sourcebooksCatalogMock = {
         initialize: jasmine.createSpy('initialize').and.resolveTo(undefined),
@@ -123,6 +126,8 @@ describe('DataService', () => {
         dbServiceMock.getForce.calls.reset();
         dbServiceMock.getForce.and.resolveTo(null);
         dbServiceMock.saveForce.calls.reset();
+        dbServiceMock.updateForceTags.calls.reset();
+        dbServiceMock.updateForceTags.and.resolveTo(null);
         dbServiceMock.waitForDbReady.calls.reset();
         dbServiceMock.waitForDbReady.and.resolveTo(undefined);
         wsServiceMock.sendAndWaitForResponse.calls.reset();
@@ -186,12 +191,14 @@ describe('DataService', () => {
         megaMekRulesetsCatalogMock.getRulesets.and.returnValue([]);
         megaMekRulesetsCatalogMock.getRulesetByFactionKey.calls.reset();
         megaMekRulesetsCatalogMock.getRulesetByFactionKey.and.returnValue(undefined);
-        mulUnitSourcesCatalogMock.initialize.calls.reset();
-        mulUnitSourcesCatalogMock.initialize.and.resolveTo(undefined);
         quirksCatalogMock.initialize.calls.reset();
         quirksCatalogMock.initialize.and.resolveTo(undefined);
         quirksCatalogMock.getQuirkByName.calls.reset();
         quirksCatalogMock.getQuirkByName.and.returnValue(undefined);
+        sarnaPageTitlesCatalogMock.initialize.calls.reset();
+        sarnaPageTitlesCatalogMock.initialize.and.resolveTo(undefined);
+        sarnaPageTitlesCatalogMock.getPageTitleForUnit.calls.reset();
+        sarnaPageTitlesCatalogMock.getPageTitleForUnit.and.returnValue(undefined);
         sourcebooksCatalogMock.initialize.calls.reset();
         sourcebooksCatalogMock.initialize.and.resolveTo(undefined);
         sourcebooksCatalogMock.getSourcebookByAbbrev.calls.reset();
@@ -226,8 +233,8 @@ describe('DataService', () => {
                 { provide: MegaMekAvailabilityCatalogService, useValue: megaMekAvailabilityCatalogMock },
                 { provide: MegaMekFactionsCatalogService, useValue: megaMekFactionsCatalogMock },
                 { provide: MegaMekRulesetsCatalogService, useValue: megaMekRulesetsCatalogMock },
-                { provide: MulUnitSourcesCatalogService, useValue: mulUnitSourcesCatalogMock },
                 { provide: QuirksCatalogService, useValue: quirksCatalogMock },
+                { provide: SarnaPageTitlesCatalogService, useValue: sarnaPageTitlesCatalogMock },
                 { provide: SourcebooksCatalogService, useValue: sourcebooksCatalogMock },
                 { provide: TagsService, useValue: tagsServiceMock },
                 { provide: PublicTagsService, useValue: publicTagsServiceMock },
@@ -242,6 +249,14 @@ describe('DataService', () => {
         service.getUnitByName('Mad Cat Prime');
 
         expect(unitRuntimeServiceMock.getUnitByName).toHaveBeenCalledOnceWith('Mad Cat Prime');
+    });
+
+    it('delegates Sarna page-title lookup to the Sarna catalog', () => {
+        const unit = createEmptyUnit({ chassis: 'Avatar', type: 'Mek', subtype: 'BattleMek Omni', omni: 1 });
+        sarnaPageTitlesCatalogMock.getPageTitleForUnit.and.returnValue('Avatar (OmniMech)');
+
+        expect(service.getSarnaPageTitleForUnit(unit)).toBe('Avatar (OmniMech)');
+        expect(sarnaPageTitlesCatalogMock.getPageTitleForUnit).toHaveBeenCalledOnceWith(unit);
     });
 
     it('merges local force entries with lightweight cloud bulk entries', async () => {
@@ -311,7 +326,12 @@ describe('DataService', () => {
         expect(entries[0].cloud).toBeTrue();
         expect(entries[0].owned).toBeFalse();
         expect(entries[0].groups[0].formationId).toBe('formation-1');
-        expect(entries[0].groups[0].units[0]).toEqual({ unit: atlas, alias: 'Skull', destroyed: true });
+        expect(entries[0].groups[0].units[0]).toEqual(jasmine.objectContaining({
+            unit: atlas,
+            alias: 'Skull',
+            destroyed: true,
+            lockKey: jasmine.any(String),
+        }));
         expect(entries[1].name).toBe('Cloud Only');
         expect(entries[1].local).toBeFalse();
         expect(entries[1].cloud).toBeTrue();
@@ -368,13 +388,51 @@ describe('DataService', () => {
         expect(dbServiceMock.saveForce).toHaveBeenCalledWith(jasmine.objectContaining({ instanceId: 'force-missing' }));
     });
 
-    it('initializes only MegaMek availability during startup initialize', async () => {
+    it('updates force tags through the lightweight local and cloud path', async () => {
+        dbServiceMock.updateForceTags.and.resolveTo({
+            version: 1,
+            instanceId: 'force-1',
+            timestamp: '2026-04-01T00:00:00Z',
+            type: GameSystem.CLASSIC,
+            name: 'Tagged Force',
+            tags: ['Recon', 'Fire Support'],
+            groups: [],
+        });
+        wsServiceMock.sendAndWaitForResponse.and.resolveTo({
+            action: 'forceTagsUpdated',
+            instanceId: 'force-1',
+            tags: ['Recon', 'Fire Support'],
+        });
+        spyOn<any>(service, 'canUseCloud').and.returnValue(Promise.resolve({} as WebSocket));
+
+        const tags = await service.updateForceTags('force-1', ['  Recon ', 'recon', 'Fire   Support'], true);
+
+        expect(tags).toEqual(['Recon', 'Fire Support']);
+        expect(dbServiceMock.updateForceTags).toHaveBeenCalledWith('force-1', ['Recon', 'Fire Support']);
+        expect(wsServiceMock.sendAndWaitForResponse).toHaveBeenCalledWith({
+            action: 'setForceTags',
+            uuid: 'user-1',
+            instanceId: 'force-1',
+            tags: ['Recon', 'Fire Support'],
+        });
+    });
+
+    it('rejects lightweight tag updates when neither local nor cloud storage can be updated', async () => {
+        spyOn<any>(service, 'canUseCloud').and.returnValue(Promise.resolve(null));
+
+        await expectAsync(service.updateForceTags('force-missing', ['Recon'], true)).toBeRejectedWithError(
+            'The selected force could not be updated.',
+        );
+    });
+
+    it('initializes startup catalogs during initialize', async () => {
         await service.initialize();
 
         expect(megaMekAvailabilityCatalogMock.initialize).toHaveBeenCalledTimes(1);
         expect(megaMekFactionsCatalogMock.initialize).not.toHaveBeenCalled();
         expect(megaMekRulesetsCatalogMock.initialize).not.toHaveBeenCalled();
         expect(quirksCatalogMock.initialize).toHaveBeenCalledTimes(1);
+        expect(sarnaPageTitlesCatalogMock.initialize).toHaveBeenCalledTimes(1);
         expect(sourcebooksCatalogMock.initialize).toHaveBeenCalledTimes(1);
         expect(service.isDataReady()).toBeTrue();
     });

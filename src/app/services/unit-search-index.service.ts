@@ -38,9 +38,10 @@ import type { Era } from '../models/eras.model';
 import type { BucketStatSummary, MinMaxStatsRange, UnitSubtypeMaxStats } from './data.service';
 import { removeAccents } from '../utils/string.util';
 import { naturalCompare } from '../utils/sort.util';
-import { getMergedTags } from '../utils/unit-search-shared.util';
+import { getMergedTags, getUnitSourceFilterValues } from '../utils/unit-search-shared.util';
 import { calculateWeightedMaxRange, getMaxRangeFromComponents } from '../utils/unit-range.util';
-import { AS_MOVEMENT_MODE_DISPLAY_NAMES } from './unit-search-filters.model';
+import { parseASDamageValue } from '../utils/as-damage.util';
+import { AS_MOVEMENT_MODE_DISPLAY_NAMES, BOOLEAN_FILTERS, getBooleanFilterUnitValue } from './unit-search-filters.model';
 import type { UnitSearchWorkerFactionEraSnapshot, UnitSearchWorkerIndexSnapshot } from '../utils/unit-search-worker-protocol.util';
 import { MULFACTION_EXTINCT } from '../models/mulfactions.model';
 
@@ -246,10 +247,10 @@ export class UnitSearchIndexService {
 
             if (unit.as) {
                 if (unit.as.dmg) {
-                    unit.as.dmg._dmgS = parseFloat(unit.as.dmg.dmgS) || 0;
-                    unit.as.dmg._dmgM = parseFloat(unit.as.dmg.dmgM) || 0;
-                    unit.as.dmg._dmgL = parseFloat(unit.as.dmg.dmgL) || 0;
-                    unit.as.dmg._dmgE = parseFloat(unit.as.dmg.dmgE) || 0;
+                    unit.as.dmg._dmgS = parseASDamageValue(unit.as.dmg.dmgS) ?? 0;
+                    unit.as.dmg._dmgM = parseASDamageValue(unit.as.dmg.dmgM) ?? 0;
+                    unit.as.dmg._dmgL = parseASDamageValue(unit.as.dmg.dmgL) ?? 0;
+                    unit.as.dmg._dmgE = parseASDamageValue(unit.as.dmg.dmgE) ?? 0;
                 }
 
                 if (unit.as.MVm && unit.as.MVm['j'] !== undefined && unit.as.MVm[''] === undefined) {
@@ -323,12 +324,15 @@ export class UnitSearchIndexService {
             this.addSearchIndexValue('as.TP', unit.as?.TP, unit.name);
             this.addSearchIndexValues('as.specials', unit.as?.specials ?? [], unit.name);
             this.addSearchIndexValues('as._motive', this.getASMotiveDisplayNames(unit), unit.name);
-            this.addSearchIndexValues('source', unit.source ?? [], unit.name);
+            this.addSearchIndexValues('source', getUnitSourceFilterValues(unit), unit.name);
             this.addSearchIndexValues('componentName', unit.comp.map(component => component.n), unit.name);
             this.addComponentCountValues(unit);
             this.addSearchIndexValues('features', unit.features ?? [], unit.name);
             this.addSearchIndexValues('quirks', unit.quirks ?? [], unit.name);
             this.addSearchIndexValues('_tags', getMergedTags(unit), unit.name);
+            for (const filter of BOOLEAN_FILTERS) {
+                this.addSearchIndexValue(filter.key, getBooleanFilterUnitValue(filter, unit[filter.key as keyof Unit]) ? 'yes' : 'no', unit.name);
+            }
         }
 
         for (const era of eras) {

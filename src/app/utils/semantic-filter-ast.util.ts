@@ -58,11 +58,12 @@
  */
 
 import type { GameSystem } from '../models/common.model';
-import { ADVANCED_FILTERS, type AdvFilterConfig, AdvFilterType, type AvailabilityFilterScope } from '../services/unit-search-filters.model';
+import { ADVANCED_FILTERS, type AdvFilterConfig, AdvFilterType, type AvailabilityFilterScope, FORMATION_TARGET_FILTER_KEY, getBooleanFilterUnitValue, parseBooleanFilterSemanticValue } from '../services/unit-search-filters.model';
 import { type SemanticOperator, type SemanticToken, buildSemanticKeyMap, VIRTUAL_SEMANTIC_KEYS, parseValues, parseValueWithQuantity, type QuantityConstraint } from './semantic-filter.util';
 import { normalizeLooseText, wildcardToRegex } from './string.util';
 import { usesIndexedDropdownUniverse } from './unit-search-filter-config.util';
 import { checkQuantityConstraint as checkQuantityConstraintCore, isEmbeddedApostrophe } from './unit-search-shared.util';
+import { isASDamageSemanticKey, parseASDamageValue } from './as-damage.util';
 
 // ============================================================================
 // Helpers
@@ -352,6 +353,9 @@ function tryParseFilterToken(
     } else if (input[i] === '=') {
         operator = '=';
         i += 1;
+    } else if (input[i] === ':' && conf?.type === AdvFilterType.BOOLEAN) {
+        operator = '=';
+        i += 1;
     } else if (input[i] === '>') {
         operator = '>';
         i += 1;
@@ -370,7 +374,14 @@ function tryParseFilterToken(
         }
     }
 
-    if (operator === '==' && (!conf || (conf.type !== AdvFilterType.DROPDOWN && conf.type !== AdvFilterType.SEMANTIC))) {
+    if (conf && conf.type === AdvFilterType.BOOLEAN) {
+        const validBooleanOperators: SemanticOperator[] = ['=', '==', '!='];
+        if (!validBooleanOperators.includes(operator)) {
+            return null;
+        }
+    }
+
+    if (operator === '==' && (!conf || (conf.type !== AdvFilterType.DROPDOWN && conf.type !== AdvFilterType.SEMANTIC && conf.type !== AdvFilterType.BOOLEAN))) {
         return null;
     }
     
@@ -749,6 +760,57 @@ export function parseSemanticQueryAST(input: string, gameSystem: GameSystem, ret
     return result;
 }
 
+function emptyTrueGroup(start: number, end: number): GroupASTNode {
+    return { type: 'group', operator: 'AND', start, end, children: [] };
+}
+
+function stripSemanticFieldNode(node: ASTNode, fields: ReadonlySet<string>): { node: ASTNode; alwaysTrue: boolean } {
+    if (node.type === 'filter') {
+        return fields.has(node.token.field)
+            ? { node: emptyTrueGroup(node.start, node.end), alwaysTrue: true }
+            : { node, alwaysTrue: false };
+    }
+
+    if (node.type !== 'group') {
+        return { node, alwaysTrue: false };
+    }
+
+    const strippedChildren = node.children.map(child => stripSemanticFieldNode(child, fields));
+    if (node.operator === 'OR' && strippedChildren.some(child => child.alwaysTrue)) {
+        return { node: emptyTrueGroup(node.start, node.end), alwaysTrue: true };
+    }
+
+    const children = strippedChildren
+        .filter(child => !child.alwaysTrue)
+        .map(child => child.node);
+
+    if (children.length === 0) {
+        return { node: emptyTrueGroup(node.start, node.end), alwaysTrue: true };
+    }
+
+    return {
+        node: { ...node, children },
+        alwaysTrue: false,
+    };
+}
+
+export function stripSemanticFieldsFromParseResult(parsed: ParseResult, fields: ReadonlySet<string>): ParseResult {
+    if (fields.size === 0) {
+        return parsed;
+    }
+
+    const strippedRoot = stripSemanticFieldNode(parsed.ast, fields).node;
+    const ast = strippedRoot.type === 'group'
+        ? strippedRoot
+        : { type: 'group', operator: 'AND', start: strippedRoot.start, end: strippedRoot.end, children: [strippedRoot] } as GroupASTNode;
+
+    return {
+        ...parsed,
+        ast,
+        tokens: parsed.tokens.filter(token => !fields.has(token.field)),
+    };
+}
+
 /**
  * Validate a semantic query and return errors for highlighting.
  * Returns an array of errors with positions for UI highlighting.
@@ -1056,7 +1118,7 @@ export interface EvaluatorContext {
     unitBelongsToEra?: (unit: any, eraName: string, scope?: AvailabilityFilterScope) => boolean;
     /** Check if a unit belongs to a specific faction (external filter) */
     unitBelongsToFaction?: (unit: any, factionName: string, eraNames?: readonly string[]) => boolean;
-    /** Check if a unit matches a MegaMek availability source (production or salvage). */
+    /** Check if a unit matches a MegaMek availability source (requisition or salvage). */
     unitMatchesAvailabilityFrom?: (unit: any, availabilityFromName: string, scope?: AvailabilityFilterScope) => boolean;
     /** Check if a unit matches a MegaMek availability rarity in the active scope. */
     unitMatchesAvailabilityRarity?: (unit: any, rarityName: string, scope?: AvailabilityFilterScope) => boolean;
@@ -1072,6 +1134,10 @@ export interface EvaluatorContext {
     unitBelongsToForcePack?: (unit: any, packName: string) => boolean;
     /** Get all force pack names (for wildcard expansion) */
     getAllForcePackNames?: () => string[];
+    /** Check if adding a unit would preserve a target formation search. */
+    unitMatchesFormationTarget?: (unit: any, formationName: string) => boolean;
+    /** Get all formation target names (for wildcard expansion). */
+    getAllFormationNames?: () => string[];
     /** 
      * Get AS movement values filtered by active motive selection.
      * Returns array of movement values to check for range filtering.
@@ -1098,10 +1164,38 @@ type ParsedRangeValue =
     | { type: 'range'; min: number; max: number }
     | { type: 'single'; num: number };
 
+type SpecialSlotOperator = '=' | '!=' | '>' | '<' | '>=' | '<=';
+
+interface SpecialSlotValue {
+    text: string;
+    rank: number;
+}
+
+type SpecialQueryToken =
+    | { type: 'literal'; text: string }
+    | { type: 'slot'; matcher: SpecialSlotMatcher };
+
+type SpecialTargetToken =
+    | { type: 'literal'; text: string }
+    | { type: 'slot'; value: SpecialSlotValue | null };
+
+type SpecialSlotMatcher =
+    | { type: 'any' }
+    | { type: 'missing' }
+    | { type: 'comparison'; operator: SpecialSlotOperator; value: SpecialSlotValue }
+    | { type: 'set'; values: readonly SpecialSlotValue[] };
+
+interface ParsedSpecialQuery {
+    tokens: SpecialQueryToken[];
+}
+
 const RANGE_VALUE_PATTERN = /^(-?\d+(?:\.\d+)?)[-~](-?\d+(?:\.\d+)?)$/;
+const AS_DAMAGE_RANGE_VALUE_PATTERN = /^(0\*|-?\d+(?:\.\d+)?)[-~](0\*|-?\d+(?:\.\d+)?)$/i;
+const SPECIAL_EXPLICIT_NUMERIC_QUERY_PATTERN = /(?:>=|<=|!=|>|<|=)\s*-?\d|\[[^\]]+\]/;
 const FILTER_CONFIGS_BY_SEMANTIC_KEY = new Map<string, AdvFilterConfig[]>();
 const sortedFilterConfigsCache = new WeakMap<EvaluatorContext, Map<string, readonly AdvFilterConfig[]>>();
 const parsedRangeValuesCache = new WeakMap<SemanticToken, ParsedRangeValue[]>();
+const parsedSpecialQueryCache = new Map<string, ParsedSpecialQuery | null>();
 
 for (const filterConfig of ADVANCED_FILTERS) {
     const semanticKey = filterConfig.semanticKey || filterConfig.key;
@@ -1140,21 +1234,36 @@ function getSortedFilterConfigs(context: EvaluatorContext, semanticKey: string):
     return sorted;
 }
 
-function preParseRangeValues(values: string[]): ParsedRangeValue[] {
+function parseRangeFilterNumber(value: string, semanticKey: string): number | null {
+    if (isASDamageSemanticKey(semanticKey)) {
+        return parseASDamageValue(value);
+    }
+
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function preParseRangeValues(values: string[], semanticKey: string): ParsedRangeValue[] {
     const parsedValues: ParsedRangeValue[] = [];
     for (const value of values) {
-        const rangeMatch = value.match(RANGE_VALUE_PATTERN);
+        const rangeMatch = value.match(isASDamageSemanticKey(semanticKey) ? AS_DAMAGE_RANGE_VALUE_PATTERN : RANGE_VALUE_PATTERN);
         if (rangeMatch) {
+            const min = parseRangeFilterNumber(rangeMatch[1], semanticKey);
+            const max = parseRangeFilterNumber(rangeMatch[2], semanticKey);
+            if (min === null || max === null) {
+                continue;
+            }
+
             parsedValues.push({
                 type: 'range',
-                min: parseFloat(rangeMatch[1]),
-                max: parseFloat(rangeMatch[2]),
+                min: Math.min(min, max),
+                max: Math.max(min, max),
             });
             continue;
         }
 
-        const num = parseFloat(value);
-        if (!Number.isNaN(num)) {
+        const num = parseRangeFilterNumber(value, semanticKey);
+        if (num !== null) {
             parsedValues.push({ type: 'single', num });
         }
     }
@@ -1164,7 +1273,7 @@ function preParseRangeValues(values: string[]): ParsedRangeValue[] {
 function getParsedRangeValues(filter: SemanticToken): ParsedRangeValue[] {
     let cached = parsedRangeValuesCache.get(filter);
     if (!cached) {
-        cached = preParseRangeValues(filter.values);
+        cached = preParseRangeValues(filter.values, filter.field);
         parsedRangeValuesCache.set(filter, cached);
     }
     return cached;
@@ -1605,6 +1714,8 @@ function evaluateSingleFilterConfig(
     // Handle different filter types
     if (conf.type === AdvFilterType.RANGE) {
         return evaluateRangeFilter(unitValue, operator, parsedRangeValues, conf);
+    } else if (conf.type === AdvFilterType.BOOLEAN) {
+        return evaluateBooleanFilter(unitValue, operator, values, conf);
     } else if (conf.type === AdvFilterType.DROPDOWN) {
         return evaluateDropdownFilter(unit, unitValue, operator, values, conf, context);
     } else if (conf.type === AdvFilterType.SEMANTIC) {
@@ -1612,6 +1723,32 @@ function evaluateSingleFilterConfig(
     }
     
     return true;
+}
+
+function evaluateBooleanFilter(
+    unitValue: any,
+    operator: SemanticOperator,
+    values: string[],
+    conf: AdvFilterConfig,
+): boolean {
+    const actualValue = getBooleanFilterUnitValue(conf, unitValue);
+    const expectedValues = values
+        .map(value => parseBooleanFilterSemanticValue(value))
+        .filter((value): value is boolean => value !== null);
+
+    if (expectedValues.length === 0) {
+        return operator === '!=';
+    }
+
+    if (operator === '!=') {
+        return expectedValues.every(expectedValue => actualValue !== expectedValue);
+    }
+
+    if (operator === '&=') {
+        return expectedValues.every(expectedValue => actualValue === expectedValue);
+    }
+
+    return expectedValues.some(expectedValue => actualValue === expectedValue);
 }
 
 /**
@@ -1700,6 +1837,13 @@ function buildIndexedCandidateSetForConfig(
     if (!context.getIndexedUnitIds || !context.getIndexedFilterValues) {
         return null;
     }
+    if (conf.key === 'as.specials') {
+        return null;
+    }
+    if (conf.type === AdvFilterType.BOOLEAN) {
+        return buildIndexedBooleanCandidateSet(conf, operator, values, context, activeScope);
+    }
+
     if (conf.type !== AdvFilterType.DROPDOWN || conf.countable) {
         return null;
     }
@@ -1767,6 +1911,58 @@ function buildIndexedCandidateSetForConfig(
     }
 
     return null;
+}
+
+function buildIndexedBooleanCandidateSet(
+    conf: AdvFilterConfig,
+    operator: SemanticOperator,
+    values: string[],
+    context: EvaluatorContext,
+    activeScope?: AvailabilityFilterScope,
+): Set<string | number> | null {
+    if (operator === '&=') {
+        return null;
+    }
+
+    const indexedValues = context.getIndexedFilterValues?.(conf.key) ?? [];
+    if (indexedValues.length === 0) {
+        return null;
+    }
+
+    const parsedValues = values
+        .map(value => parseBooleanFilterSemanticValue(value))
+        .filter((value): value is boolean => value !== null);
+    if (parsedValues.length === 0) {
+        return null;
+    }
+
+    const expectedValues = new Set(parsedValues);
+    const targetValues = new Set<boolean>();
+    if (operator === '!=') {
+        for (const value of [true, false]) {
+            if (!expectedValues.has(value)) {
+                targetValues.add(value);
+            }
+        }
+    } else {
+        for (const value of expectedValues) {
+            targetValues.add(value);
+        }
+    }
+
+    const candidateIds = new Set<string | number>();
+    for (const targetValue of targetValues) {
+        const indexedIds = context.getIndexedUnitIds?.(conf.key, targetValue ? 'yes' : 'no', activeScope);
+        if (!indexedIds) {
+            continue;
+        }
+
+        for (const unitId of indexedIds) {
+            candidateIds.add(unitId);
+        }
+    }
+
+    return candidateIds;
 }
 
 function getIndexedCandidateIdsForFilter(
@@ -1904,6 +2100,9 @@ function evaluateExternalFilter(
     } else if (conf.key === 'forcePack' && context.unitBelongsToForcePack) {
         checkMembership = (name: string) => context.unitBelongsToForcePack!(unit, name);
         getAllNames = context.getAllForcePackNames;
+    } else if (conf.key === FORMATION_TARGET_FILTER_KEY && context.unitMatchesFormationTarget) {
+        checkMembership = (name: string) => context.unitMatchesFormationTarget!(unit, name);
+        getAllNames = context.getAllFormationNames;
     } else {
         // External filter handler not provided, pass through
         return true;
@@ -2131,6 +2330,440 @@ function checkQuantityConstraint(
     );
 }
 
+function splitASSpecialArguments(content: string): string[] {
+    const result: string[] = [];
+    let current = '';
+    let depth = 0;
+
+    for (const char of content) {
+        if (char === '(') {
+            depth++;
+            current += char;
+            continue;
+        }
+
+        if (char === ')') {
+            depth--;
+            current += char;
+            continue;
+        }
+
+        if (char === ',' && depth === 0) {
+            if (current.trim()) {
+                result.push(current.trim());
+            }
+            current = '';
+            continue;
+        }
+
+        current += char;
+    }
+
+    if (current.trim()) {
+        result.push(current.trim());
+    }
+
+    return result;
+}
+
+function isTurretDamagePattern(content: string): boolean {
+    return /^(?:-|\d+(?:\.\d+)?\*?)(?:\/(?:-|\d+(?:\.\d+)?\*?))+$/.test(content.replace(/\s+/g, ''));
+}
+
+function addASSpecialSearchValues(value: string, target: string[]): void {
+    const trimmedValue = value.trim();
+    if (!trimmedValue) {
+        return;
+    }
+
+    target.push(trimmedValue);
+
+    const compositeMatch = trimmedValue.match(/^TUR\s*\((.*)\)$/i);
+    if (!compositeMatch) {
+        return;
+    }
+
+    for (const part of splitASSpecialArguments(compositeMatch[1])) {
+        const trimmedPart = part.trim();
+        if (!trimmedPart || isTurretDamagePattern(trimmedPart)) {
+            continue;
+        }
+        target.push(trimmedPart);
+    }
+}
+
+function getASSpecialSearchValues(unitValue: any): string[] {
+    if (unitValue == null) {
+        return [];
+    }
+
+    const rawValues = Array.isArray(unitValue) ? unitValue : [unitValue];
+    const searchValues: string[] = [];
+    for (const rawValue of rawValues) {
+        addASSpecialSearchValues(String(rawValue), searchValues);
+    }
+    return searchValues;
+}
+
+function normalizeSpecialNumericText(value: string): string {
+    return value.replace(/\s+/g, '').toUpperCase();
+}
+
+function shouldParseSpecialNumericQuery(value: string): boolean {
+    const text = normalizeSpecialNumericText(value);
+    if (SPECIAL_EXPLICIT_NUMERIC_QUERY_PATTERN.test(text) || text.includes('0*')) {
+        return true;
+    }
+
+    if (text.includes('*')) {
+        return false;
+    }
+
+    return /-?\d/.test(text);
+}
+
+function flushSpecialLiteral<T extends SpecialQueryToken | SpecialTargetToken>(
+    tokens: T[],
+    literal: string,
+): void {
+    if (literal) {
+        tokens.push({ type: 'literal', text: literal } as T);
+    }
+}
+
+function parseSpecialSlotValue(text: string, start: number): { value: SpecialSlotValue; end: number } | null {
+    const match = text.slice(start).match(/^-?\d+(?:\.\d+)?/);
+    if (!match) {
+        return null;
+    }
+
+    const numericValue = Number(match[0]);
+    if (!Number.isFinite(numericValue)) {
+        return null;
+    }
+
+    const end = start + match[0].length;
+    if (match[0] === '0' && text[end] === '*') {
+        return { value: { text: '0*', rank: 0.5 }, end: end + 1 };
+    }
+
+    return { value: { text: match[0], rank: numericValue }, end };
+}
+
+function readSpecialSlotOperator(text: string, start: number): { operator: SpecialSlotOperator; end: number } | null {
+    const twoCharOperator = text.slice(start, start + 2);
+    if (twoCharOperator === '>=' || twoCharOperator === '<=' || twoCharOperator === '!=') {
+        return { operator: twoCharOperator, end: start + 2 };
+    }
+
+    const oneCharOperator = text[start];
+    if (oneCharOperator === '>' || oneCharOperator === '<' || oneCharOperator === '=') {
+        return { operator: oneCharOperator, end: start + 1 };
+    }
+
+    return null;
+}
+
+function parseSpecialNumberSet(text: string, start: number): { values: SpecialSlotValue[]; end: number } | null {
+    if (text[start] !== '[') {
+        return null;
+    }
+
+    const end = text.indexOf(']', start + 1);
+    if (end === -1) {
+        return null;
+    }
+
+    const values: SpecialSlotValue[] = [];
+    for (const part of text.slice(start + 1, end).split(',')) {
+        const trimmedPart = part.trim();
+        if (!trimmedPart) {
+            return null;
+        }
+        const slotValue = parseSpecialSlotValue(trimmedPart, 0);
+        if (!slotValue || slotValue.end !== trimmedPart.length) {
+            return null;
+        }
+        values.push(slotValue.value);
+    }
+
+    return values.length > 0 ? { values, end: end + 1 } : null;
+}
+
+function isMissingSpecialSlot(text: string, index: number): boolean {
+    if (text[index] !== '-') {
+        return false;
+    }
+
+    const previous = index === 0 ? '' : text[index - 1];
+    const next = index + 1 >= text.length ? '' : text[index + 1];
+    const hasSlotBoundaryBefore = index === 0 || previous === '/' || previous === '(' || previous === ',';
+    const hasSlotBoundaryAfter = index + 1 >= text.length || next === '/' || next === ')' || next === ',';
+    return hasSlotBoundaryBefore && hasSlotBoundaryAfter;
+}
+
+function parseSpecialQuery(value: string): ParsedSpecialQuery | null {
+    if (!shouldParseSpecialNumericQuery(value)) {
+        return null;
+    }
+
+    const cached = parsedSpecialQueryCache.get(value);
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    const text = normalizeSpecialNumericText(value);
+    const tokens: SpecialQueryToken[] = [];
+    let literal = '';
+    let index = 0;
+
+    while (index < text.length) {
+        const set = parseSpecialNumberSet(text, index);
+        if (set) {
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({ type: 'slot', matcher: { type: 'set', values: set.values } });
+            index = set.end;
+            continue;
+        }
+
+        const operator = readSpecialSlotOperator(text, index);
+        if (operator) {
+            const slotValue = parseSpecialSlotValue(text, operator.end);
+            if (!slotValue) {
+                parsedSpecialQueryCache.set(value, null);
+                return null;
+            }
+
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({
+                type: 'slot',
+                matcher: {
+                    type: 'comparison',
+                    operator: operator.operator,
+                    value: slotValue.value,
+                },
+            });
+            index = slotValue.end;
+            continue;
+        }
+
+        if (text[index] === '*') {
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({ type: 'slot', matcher: { type: 'any' } });
+            index++;
+            continue;
+        }
+
+        if (isMissingSpecialSlot(text, index)) {
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({ type: 'slot', matcher: { type: 'missing' } });
+            index++;
+            continue;
+        }
+
+        const slotValue = parseSpecialSlotValue(text, index);
+        if (slotValue) {
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({
+                type: 'slot',
+                matcher: {
+                    type: 'comparison',
+                    operator: '=',
+                    value: slotValue.value,
+                },
+            });
+            index = slotValue.end;
+            continue;
+        }
+
+        literal += text[index];
+        index++;
+    }
+
+    flushSpecialLiteral(tokens, literal);
+
+    const hasSlotMatcher = tokens.some(token => token.type === 'slot');
+    const parsed = hasSlotMatcher ? { tokens } : null;
+    parsedSpecialQueryCache.set(value, parsed);
+    return parsed;
+}
+
+function parseSpecialTarget(value: string): SpecialTargetToken[] {
+    const text = normalizeSpecialNumericText(value);
+    const tokens: SpecialTargetToken[] = [];
+    let literal = '';
+    let index = 0;
+
+    while (index < text.length) {
+        if (isMissingSpecialSlot(text, index)) {
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({ type: 'slot', value: null });
+            index++;
+            continue;
+        }
+
+        const slotValue = parseSpecialSlotValue(text, index);
+        if (slotValue) {
+            flushSpecialLiteral(tokens, literal);
+            literal = '';
+            tokens.push({ type: 'slot', value: slotValue.value });
+            index = slotValue.end;
+            continue;
+        }
+
+        literal += text[index];
+        index++;
+    }
+
+    flushSpecialLiteral(tokens, literal);
+    return tokens;
+}
+
+function specialSlotValuesEqual(left: SpecialSlotValue, right: SpecialSlotValue): boolean {
+    if (left.text === '0*' || right.text === '0*') {
+        return left.text === right.text;
+    }
+
+    return left.rank === right.rank;
+}
+
+function compareSpecialSlotValues(left: SpecialSlotValue, right: SpecialSlotValue, operator: SpecialSlotOperator): boolean {
+    switch (operator) {
+        case '=':
+            return specialSlotValuesEqual(left, right);
+        case '!=':
+            return !specialSlotValuesEqual(left, right);
+        case '>':
+            return left.rank > right.rank;
+        case '<':
+            return left.rank < right.rank;
+        case '>=':
+            return left.rank >= right.rank;
+        case '<=':
+            return left.rank <= right.rank;
+    }
+}
+
+function specialSlotMatches(slotValue: SpecialSlotValue | null, matcher: SpecialSlotMatcher): boolean {
+    if (matcher.type === 'any') {
+        return true;
+    }
+
+    if (matcher.type === 'missing') {
+        return slotValue === null;
+    }
+
+    if (slotValue === null) {
+        return false;
+    }
+
+    if (matcher.type === 'set') {
+        return matcher.values.some(value => specialSlotValuesEqual(value, slotValue));
+    }
+
+    return compareSpecialSlotValues(slotValue, matcher.value, matcher.operator);
+}
+
+function hasOnlyTrailingSpecialSlots(tokens: SpecialTargetToken[], start: number): boolean {
+    let index = start;
+    while (index < tokens.length) {
+        const separator = tokens[index];
+        if (separator?.type !== 'literal' || separator.text !== '/') {
+            return false;
+        }
+        index++;
+
+        if (tokens[index]?.type !== 'slot') {
+            return false;
+        }
+        index++;
+    }
+
+    return true;
+}
+
+function specialNumericQueryMatches(value: string, query: ParsedSpecialQuery): boolean {
+    const targetTokens = parseSpecialTarget(value);
+    let targetIndex = 0;
+
+    for (const queryToken of query.tokens) {
+        const targetToken = targetTokens[targetIndex];
+        if (!targetToken) {
+            return false;
+        }
+
+        if (queryToken.type === 'literal') {
+            if (targetToken.type !== 'literal' || targetToken.text !== queryToken.text) {
+                return false;
+            }
+            targetIndex++;
+            continue;
+        }
+
+        if (targetToken.type !== 'slot' || !specialSlotMatches(targetToken.value, queryToken.matcher)) {
+            return false;
+        }
+        targetIndex++;
+    }
+
+    return targetIndex === targetTokens.length || hasOnlyTrailingSpecialSlots(targetTokens, targetIndex);
+}
+
+function asSpecialMatchesQuery(value: string, queryValue: string): boolean {
+    const numericQuery = parseSpecialQuery(queryValue);
+    if (numericQuery) {
+        return specialNumericQueryMatches(value, numericQuery);
+    }
+
+    if (queryValue.includes('*')) {
+        return wildcardToRegex(queryValue).test(value);
+    }
+
+    return value.toLowerCase() === queryValue.toLowerCase();
+}
+
+function evaluateASSpecialsFilter(
+    unitValue: any,
+    operator: SemanticOperator,
+    values: string[],
+): boolean {
+    const topLevelValues = unitValue == null ? [] : (Array.isArray(unitValue) ? unitValue : [unitValue]).map(value => String(value));
+    const searchValues = getASSpecialSearchValues(unitValue);
+
+    if (searchValues.length === 0) {
+        return operator === '!=';
+    }
+
+    if (operator === '&=') {
+        return values.every(value => searchValues.some(special => asSpecialMatchesQuery(special, value)));
+    }
+
+    if (operator === '==') {
+        return topLevelValues.length > 0 && topLevelValues.every(special => (
+            values.some(value => asSpecialMatchesQuery(special, value))
+        ));
+    }
+
+    for (const value of values) {
+        const matches = searchValues.some(special => asSpecialMatchesQuery(special, value));
+        if (operator === '!=') {
+            if (matches) {
+                return false;
+            }
+        } else if (matches) {
+            return true;
+        }
+    }
+
+    return operator === '!=';
+}
+
 /**
  * Evaluate a dropdown filter (string matching with quantity support).
  */
@@ -2142,6 +2775,10 @@ function evaluateDropdownFilter(
     conf: AdvFilterConfig,
     context: EvaluatorContext
 ): boolean {
+    if (conf.key === 'as.specials') {
+        return evaluateASSpecialsFilter(unitValue, operator, values);
+    }
+
     if (unitValue == null) return operator === '!=';
     
     // Normalize unit value(s) to array

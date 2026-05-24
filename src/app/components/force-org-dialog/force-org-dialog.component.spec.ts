@@ -9,12 +9,14 @@ import { DataService } from '../../services/data.service';
 import { DialogsService } from '../../services/dialogs.service';
 import { ForceBuilderService } from '../../services/force-builder.service';
 import { LayoutService } from '../../services/layout.service';
+import { createEmptyUnit } from '../../testing/unit-test-helpers';
 import { UrlStateService } from '../../services/url-state.service';
 import { ForceOrgDialogComponent } from './force-org-dialog.component';
 
 describe('ForceOrgDialogComponent', () => {
     let component: ForceOrgDialogComponent;
     let fixture: import('@angular/core/testing').ComponentFixture<ForceOrgDialogComponent>;
+    let nextPlacementId = 0;
     let dialogRefStub: {
         close: jasmine.Spy;
         backdropClick: Subject<MouseEvent>;
@@ -52,6 +54,7 @@ describe('ForceOrgDialogComponent', () => {
     };
 
     beforeEach(async () => {
+        nextPlacementId = 0;
         dialogRefStub = {
             close: jasmine.createSpy('close'),
             backdropClick: new Subject<MouseEvent>(),
@@ -79,8 +82,9 @@ describe('ForceOrgDialogComponent', () => {
         urlStateServiceStub.setParams.calls.reset();
     });
 
-    function createPlacedForce(instanceId: string, x: number, y: number, groupId: string | null) {
+    function createPlacedForce(instanceId: string, x: number, y: number, groupId: string | null, placementId = `${instanceId}-placement-${nextPlacementId++}`) {
         return {
+            placementId,
             force: {
                 instanceId,
                 groups: [],
@@ -107,94 +111,29 @@ describe('ForceOrgDialogComponent', () => {
     }
 
     function createBattleMek(name: string): Unit {
-        return {
+        return createEmptyUnit({
             name,
-            id: -1,
             chassis: `Chassis ${name}`,
             model: `Model ${name}`,
-            year: 3151,
-            weightClass: 'Medium',
-            tons: 50,
-            offSpeedFactor: 0,
             bv: 1000,
             pv: 25,
-            cost: 0,
-            level: 0,
-            techBase: 'Inner Sphere',
-            techRating: 'D',
-            type: 'Mek',
-            subtype: 'BattleMek',
-            omni: 0,
-            engine: 'Fusion',
-            engineRating: 0,
-            engineHS: 0,
-            engineHSType: 'Heat Sink',
-            source: [],
-            role: '',
-            armorType: '',
-            structureType: '',
-            armor: 0,
-            armorPer: 0,
-            internal: 1,
-            heat: 0,
-            dissipation: 0,
-            moveType: 'Tracked',
-            walk: 0,
-            walk2: 0,
-            run: 0,
-            run2: 0,
-            jump: 0,
-            jump2: 0,
-            umu: 0,
-            c3: '',
-            dpt: 0,
-            comp: [],
-            su: 0,
-            crewSize: 1,
-            quirks: [],
-            features: [],
-            icon: '',
-            sheets: [],
             as: {
-                TP: 'BM',
                 PV: 25,
-                SZ: 0,
-                TMM: 0,
-                usesOV: false,
-                OV: 0,
-                MV: '0',
-                MVm: {},
-                usesTh: false,
-                Th: 0,
-                Arm: 0,
-                Str: 0,
-                specials: [],
-                dmg: {
-                    dmgS: '0',
-                    dmgM: '0',
-                    dmgL: '0',
-                    dmgE: '0',
-                },
-                usesE: false,
-                usesArcs: false,
             },
-            _searchKey: '',
-            _displayType: '',
-            _maxRange: 0,
-            _weightedMaxRange: 0,
-            _dissipationEfficiency: 0,
-            _mdSumNoPhysical: 0,
-            _mdSumNoPhysicalNoOneshots: 0,
-            _nameTags: [],
-            _chassisTags: [],
-        };
+        });
     }
 
-    function createLoadForce(instanceId: string, units: Unit[]): LoadForceEntry {
+    function createLoadForce(
+        instanceId: string,
+        units: Unit[],
+        overrides: { bv?: number; pv?: number; type?: GameSystem } = {},
+    ): LoadForceEntry {
         return new LoadForceEntry({
             instanceId,
             name: `Force ${instanceId}`,
-            type: GameSystem.CLASSIC,
+            type: overrides.type ?? GameSystem.CLASSIC,
+            bv: overrides.bv,
+            pv: overrides.pv,
             groups: [{
                 units: units.map(unit => ({ unit, destroyed: false })),
             }],
@@ -292,6 +231,75 @@ describe('ForceOrgDialogComponent', () => {
         expect(draggedForce.x() !== targetForce.x() || draggedForce.y() !== targetForce.y()).toBeTrue();
     });
 
+    it('creates a shadow clone placement that keeps the same source force and group membership', () => {
+        const group = createGroup('group-1', 0, 0, 400, 300);
+        const mainForce = createPlacedForce('force-1', 100, 100, group.id, 'main-placement');
+
+        (component as any).groups.set([group]);
+        (component as any).placedForces.set([mainForce]);
+
+        (component as any).shadowCloneForce(mainForce);
+
+        const placed = (component as any).placedForces();
+        expect(placed.length).toBe(2);
+        expect(placed[1].placementId).not.toBe(mainForce.placementId);
+        expect(placed[1].force).toBe(mainForce.force);
+        expect(placed[1].groupId).toBe(group.id);
+        expect((component as any).shadowCloneLabels().get(mainForce.placementId)).toBeUndefined();
+        expect((component as any).shadowCloneLabels().get(placed[1].placementId)).toBe('Shadow 1');
+    });
+
+    it('promotes the earliest remaining shadow clone when the main placement is removed', () => {
+        const mainForce = createPlacedForce('force-1', 0, 0, null, 'main-placement');
+
+        (component as any).placedForces.set([mainForce]);
+        (component as any).shadowCloneForce(mainForce);
+        (component as any).shadowCloneForce(mainForce);
+
+        const [, firstShadow, secondShadow] = (component as any).placedForces();
+        expect((component as any).shadowCloneLabels().get(firstShadow.placementId)).toBe('Shadow 1');
+        expect((component as any).shadowCloneLabels().get(secondShadow.placementId)).toBe('Shadow 2');
+
+        (component as any).removeForce(mainForce);
+
+        const remaining = (component as any).placedForces();
+        expect(remaining).toEqual([firstShadow, secondShadow]);
+        expect((component as any).shadowCloneLabels().get(firstShadow.placementId)).toBeUndefined();
+        expect((component as any).shadowCloneLabels().get(secondShadow.placementId)).toBe('Shadow 1');
+    });
+
+    it('highlights all placements for a hovered force clone family', () => {
+        const mainForce = createPlacedForce('force-1', 0, 0, null, 'main-placement');
+        const shadowForce = createPlacedForce('force-1', 40, 0, null, 'shadow-placement');
+        const otherForce = createPlacedForce('force-2', 80, 0, null, 'other-placement');
+
+        (component as any).placedForces.set([mainForce, shadowForce, otherForce]);
+        (component as any).hoveredForceId.set('shadow-placement');
+        fixture.detectChanges();
+
+        const host = fixture.nativeElement as HTMLElement;
+        expect(host.querySelector('[data-force-id="main-placement"]')?.classList.contains('highlighted-hover')).toBeTrue();
+        expect(host.querySelector('[data-force-id="shadow-placement"]')?.classList.contains('highlighted-hover')).toBeTrue();
+        expect(host.querySelector('[data-force-id="other-placement"]')?.classList.contains('highlighted-hover')).toBeFalse();
+    });
+
+    it('saves duplicate placements with distinct placement ids', async () => {
+        const mainForce = createPlacedForce('force-1', 0, 0, null, 'main-placement');
+        const shadowForce = createPlacedForce('force-1', 40, 0, null, 'shadow-placement');
+
+        (component as any).placedForces.set([mainForce, shadowForce]);
+        dataServiceStub.saveOrganization.calls.reset();
+
+        await (component as any).saveOrganization();
+
+        expect(dataServiceStub.saveOrganization).toHaveBeenCalledWith(jasmine.objectContaining({
+            forces: [
+                jasmine.objectContaining({ placementId: 'main-placement', instanceId: 'force-1' }),
+                jasmine.objectContaining({ placementId: 'shadow-placement', instanceId: 'force-1' }),
+            ],
+        }));
+    });
+
     it('chooses the group with the largest overlap for group drops', () => {
         const draggedGroup = createGroup('dragged', 220, 120, 220, 160);
         const weakerTarget = createGroup('group-1', 0, 0, 280, 320);
@@ -379,6 +387,25 @@ describe('ForceOrgDialogComponent', () => {
         expect(groupB.width()).toBeGreaterThan(20);
         expect(groupB.height()).toBeGreaterThan(20);
         expect((component as any).rectsOverlap(rectA, rectB)).toBeFalse();
+    });
+
+    it('uses the saved force BV for group totals instead of recalculating from units', () => {
+        const force = createLoadForce('force-a', [createBattleMek('Atlas')], { bv: 1800 });
+        const [group] = (component as any).buildGroups([
+            { id: 'group-a', name: 'Alpha', x: 0, y: 0, width: 240, height: 180, zIndex: 0, parentGroupId: null },
+        ]);
+        const placedForce = (component as any).createPlacedForceState(force, {
+            x: 40,
+            y: 60,
+            zIndex: 0,
+            groupId: group.id,
+        });
+
+        (component as any).groups.set([group]);
+        (component as any).placedForces.set([placedForce]);
+        fixture.detectChanges();
+
+        expect(group.totals()).toBe('BV: 1,800');
     });
 
     it('does not mark the TO&E dirty when clicking a force without starting a drag', () => {

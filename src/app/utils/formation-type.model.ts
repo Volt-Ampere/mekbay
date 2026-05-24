@@ -87,6 +87,8 @@ export interface FormationEffectGroup {
     excludeCommander?: boolean;
 }
 
+export type FormationGameSystemText = string | ((gameSystem: GameSystem) => string);
+
 
 export interface FormationTypeDefinition {
     id: string;
@@ -95,7 +97,8 @@ export interface FormationTypeDefinition {
     /** Alternative formation names that should count as a whole-phrase match in custom group names. */
     nameAliases?: string[];
     description: string;
-    effectDescription?: string;
+    /** Human-readable formation bonus text, optionally specialized per game system. */
+    effectDescription?: FormationGameSystemText;
     /** Whether this formation explicitly inherits parent effect groups and parent requirement display. Defaults to false. */
     inheritParentEffects?: boolean;
     /** Structured SPA distribution rules for this formation's bonus ability. */
@@ -110,7 +113,7 @@ export interface FormationTypeDefinition {
     techBase?: 'Inner Sphere' | 'Clan' | 'Special';
     minUnits: number;
     maxUnits?: number;
-    exclusiveFaction?: string;
+    exclusiveFaction?: string[];
     /** Multiple rulebook references (e.g. CO p.62, AS:CE p.117). */
     rulesRef?: RulesReference[];
 }
@@ -152,6 +155,12 @@ export function getFormationNameMatchStrings(definition: FormationTypeDefinition
     ].map(normalizeFormationNameMatchText).filter(Boolean))];
 }
 
+export function getFormationDropdownDisplayName(definition: FormationTypeDefinition): string {
+    return definition.id.endsWith('-squadron')
+        ? `${definition.name} [Aero]`
+        : definition.name;
+}
+
 export function formationNameMatchesGroupName(definition: FormationTypeDefinition, groupName: string): boolean {
     const normalizedGroupName = normalizeFormationNameMatchText(groupName);
     if (!normalizedGroupName) return false;
@@ -175,6 +184,15 @@ export function formationInheritsParentEffects(def: FormationTypeDefinition | nu
     return def?.inheritParentEffects === true;
 }
 
+export function resolveFormationGameSystemText(
+    text: FormationGameSystemText | null | undefined,
+    gameSystem: GameSystem,
+): string | null {
+    if (!text) return null;
+    const resolvedText = typeof text === 'function' ? text(gameSystem) : text;
+    return resolvedText || null;
+}
+
 /**
  * A formation definition paired with context about how it was matched.
  */
@@ -185,5 +203,6 @@ export interface FormationMatch {
      * groups from the resolved organization while checking requirements.
      */
     requirementsFiltered: boolean;
+    requirementsFilterCompositionName?: string;
     requirementsFilterNotice?: string;
 }

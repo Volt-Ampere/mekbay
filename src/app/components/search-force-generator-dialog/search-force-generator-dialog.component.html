@@ -30,7 +30,7 @@
             [class.mobile-configuration-active]="mobileTab() === 'configuration'"
             [class.mobile-preview-active]="mobileTab() === 'preview'">
             <section class="panel controls-panel">
-                <div class="description-panel framed-borders">
+                <div class="description-panel framed-borders allow-select">
                     <div class="description-title">Current Search</div>
                     @for (line of descriptionLines(); track line) {
                         <div class="description-line">{{ line }}</div>
@@ -53,12 +53,10 @@
                                     <text class="logo-text" x="750" y="30" text-anchor="start" font-size="25">TM</text>
                                 </svg>
                             </div>
-                            <div class="game-system-switch"
-                                (click)="toggleGameSystem()">
-                                <div class="switch-track" [class.as-active]="isAlphaStrike()">
-                                    <div class="switch-thumb"></div>
-                                </div>
-                            </div>
+                            <mode-switch class="game-system-switch" variant="game-system" [showLabels]="false"
+                                [selectedRight]="isAlphaStrike()" [disabled]="!this.dataService.isDataReady()"
+                                ariaLabel="Game system" switchAriaLabel="Toggle game system"
+                                (selectedRightChange)="setGameSystem($event ? GameSystem.ALPHA_STRIKE : GameSystem.CLASSIC)"></mode-switch>
                             <div class="as-logo" [class.inactive]="!isAlphaStrike()"
                                 (click)="setGameSystem(GameSystem.ALPHA_STRIKE)">
                                 <svg viewBox="0 0 88 14" xmlns="http://www.w3.org/2000/svg">
@@ -75,7 +73,7 @@
                         </div>
                     </div>
 
-                    <div class="field-pair span-all">
+                    <div class="field-pair mobile-two-column span-all">
                         <div class="form-fields">
                             <label class="field-label">Min Units</label>
                             <input class="bt-input field-input" type="number" min="1" [max]="MAX_UNITS" step="1" [value]="minUnitCount()" (input)="onMinUnitCountChange($event)" (blur)="onMinUnitCountBlur($event)" />
@@ -86,8 +84,7 @@
                             <input class="bt-input field-input" type="number" min="1" [max]="MAX_UNITS" step="1" [value]="maxUnitCount()" (blur)="onMaxUnitCountBlur($event)" />
                         </div>
                     </div>
-
-                    <div class="field-pair span-all">
+                    <div class="field-pair mobile-two-column span-all">
                         <div class="form-fields">
                             <label class="field-label">{{ budgetMinimumFieldLabel() }}</label>
                             <input
@@ -95,7 +92,7 @@
                                 type="number"
                                 min="0"
                                 step="1"
-                                [value]="budgetRange().min"
+                                [value]="budgetRange().min || ''"
                                 (input)="onBudgetMinChange($event)"
                                 placeholder="0" />
                         </div>
@@ -120,7 +117,7 @@
                                 <multi-select-dropdown
                                     class="generator-dropdown era-dropdown"
                                     [label]="''"
-                                    [options]="eraFilter()?.options ?? []"
+                                    [options]="targetFormationEraOptions()"
                                     [selected]="selectedEraValues()"
                                     [multistate]="true"
                                     [semanticOnly]="eraFilter()?.semanticOnly ?? false"
@@ -146,17 +143,32 @@
 
                         <div class="form-fields span-all">
                             <label class="field-label">Faction</label>
-                            <multi-select-dropdown
-                                class="generator-dropdown"
-                                [label]="''"
-                                [options]="factionFilter()?.options ?? []"
-                                [selected]="selectedFactionValues()"
-                                [multistate]="true"
-                                [semanticOnly]="factionFilter()?.semanticOnly ?? false"
-                                [displayText]="factionFilter()?.displayText"
-                                [displayItems]="factionFilter()?.displayItems"
-                                (selectionChange)="onFactionSelectionChange($event)">
-                            </multi-select-dropdown>
+                            <div class="dropdown-option-row">
+                                <multi-select-dropdown
+                                    class="generator-dropdown"
+                                    [label]="''"
+                                    [options]="targetFormationFactionOptions()"
+                                    [selected]="selectedFactionValues()"
+                                    [multistate]="true"
+                                    [semanticOnly]="factionFilter()?.semanticOnly ?? false"
+                                    [displayText]="factionFilter()?.displayText"
+                                    [displayItems]="factionFilter()?.displayItems"
+                                    (selectionChange)="onFactionSelectionChange($event)">
+                                </multi-select-dropdown>
+
+                                @if (selectedFactionAvailabilityMergeToggleVisible()) {
+                                    <label
+                                        class="generator-option generator-option-inline"
+                                        [tooltip]="mergeSelectedFactionAvailabilityTooltip()">
+                                        <input
+                                            class="bt-checkbox"
+                                            type="checkbox"
+                                            [checked]="mergeSelectedFactionAvailability()"
+                                            (change)="onMergeSelectedFactionAvailabilityChange($event)" />
+                                        <span class="generator-option-label">Merge</span>
+                                    </label>
+                                }
+                            </div>
                         </div>
                     </div>
 
@@ -210,55 +222,143 @@
                     </div>
 
                     <div class="form-fields span-all">
+                        <label class="field-label" for="force-generator-target-formation">Target Formations</label>
+                        <multi-select-dropdown
+                            id="force-generator-target-formation"
+                            class="generator-dropdown target-formation-dropdown"
+                            [label]="''"
+                            [options]="targetFormationOptions()"
+                            [selected]="targetFormationSelection()"
+                            [multistate]="true"
+                            [stateCycle]="targetFormationStateCycle"
+                            [countable]="true"
+                            (selectionChange)="onTargetFormationSelectionChange($event)">
+                        </multi-select-dropdown>
+                    </div>
+
+                    <div class="form-fields span-all">
+                        <div class="skill-settings-shell framed-borders">
+                            <button class="skill-settings-toggle" type="button" (click)="togglePilotSkills()">
+                                <svg class="chevron" width="12px" height="12px" fill="currentColor" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg" [class.collapsed]="!pilotSkillsOpen()">
+                                    <path d="M0 2l5 6 5-6z"/>
+                                </svg>
+                                <span class="skill-settings-title" [class.active]="pilotSkillsHasActiveSettings()">Pilot Skills</span>
+                            </button>
+
+                            @if (pilotSkillsOpen()) {
+                            <div class="skill-settings-panel">
+                                <div class="pilot-skills-controls" [class.alpha-strike]="isAlphaStrike()">
+                                @if (isAlphaStrike()) {
+                                <div class="filter-row">
+                                    <div class="range">
+                                        <label class="range-label" id="force-generator-gunnery-skill-label">Pilot Skill
+                                            <span class="range-values">
+                                                (<span class="range-value-min">{{ gunnerySkillRange()[0] }}</span>~<span class="range-value-max">{{ gunnerySkillRange()[1] }}</span>)
+                                            </span>
+                                        </label>
+                                        <range-slider
+                                            id="force-generator-gunnery-skill"
+                                            [attr.aria-labelledby]="'force-generator-gunnery-skill-label'"
+                                            [min]="minPilotSkill"
+                                            [max]="maxPilotSkill"
+                                            [value]="gunnerySkillRange()"
+                                            [availableRange]="pilotSkillAvailableRange"
+                                            [interacted]="gunnerySkillRangeActive()"
+                                            [stepSize]="1"
+                                            (valueChange)="onGunnerySkillRangeChange($event)">
+                                        </range-slider>
+                                    </div>
+                                </div>
+                                } @else {
+                                <div class="filter-row">
+                                    <div class="range">
+                                        <label class="range-label" id="force-generator-gunnery-skill-label">Gunnery
+                                            <span class="range-values">
+                                                (<span class="range-value-min">{{ gunnerySkillRange()[0] }}</span>~<span class="range-value-max">{{ gunnerySkillRange()[1] }}</span>)
+                                            </span>
+                                        </label>
+                                        <range-slider
+                                            id="force-generator-gunnery-skill"
+                                            [attr.aria-labelledby]="'force-generator-gunnery-skill-label'"
+                                            [min]="minPilotSkill"
+                                            [max]="maxPilotSkill"
+                                            [value]="gunnerySkillRange()"
+                                            [availableRange]="pilotSkillAvailableRange"
+                                            [interacted]="gunnerySkillRangeActive()"
+                                            [stepSize]="1"
+                                            (valueChange)="onGunnerySkillRangeChange($event)">
+                                        </range-slider>
+                                    </div>
+                                </div>
+                                <div class="filter-row">
+                                    <div class="range">
+                                        <label class="range-label" id="force-generator-piloting-skill-label">Piloting
+                                            <span class="range-values">
+                                                (<span class="range-value-min">{{ pilotingSkillRange()[0] }}</span>~<span class="range-value-max">{{ pilotingSkillRange()[1] }}</span>)
+                                            </span>
+                                        </label>
+                                        <range-slider
+                                            id="force-generator-piloting-skill"
+                                            [attr.aria-labelledby]="'force-generator-piloting-skill-label'"
+                                            [min]="minPilotSkill"
+                                            [max]="maxPilotSkill"
+                                            [value]="pilotingSkillRange()"
+                                            [availableRange]="pilotSkillAvailableRange"
+                                            [interacted]="pilotingSkillRangeActive()"
+                                            [stepSize]="1"
+                                            (valueChange)="onPilotingSkillRangeChange($event)">
+                                        </range-slider>
+                                    </div>
+                                </div>
+                                <div class="skill-delta-control">
+                                    <label class="skill-delta-label" for="force-generator-skill-delta">Max Delta</label>
+                                    <input
+                                        id="force-generator-skill-delta"
+                                        class="bt-input skill-delta-input"
+                                        [class.active]="maxPilotSkillDeltaActive()"
+                                        type="number"
+                                        min="0"
+                                        [max]="maxPilotSkill"
+                                        step="1"
+                                        [value]="maxPilotSkillDelta()"
+                                        (input)="onMaxPilotSkillDeltaChange($event)"
+                                        (blur)="onMaxPilotSkillDeltaBlur($event)" />
+                                    <span class="skill-delta-description">Maximum allowed difference between generated Gunnery and Piloting.</span>
+                                </div>
+                                }
+                                </div>
+                            </div>
+                            }
+                        </div>
+                    </div>
+
+                    <div class="form-fields span-all">
                         <div class="additional-filters-shell framed-borders">
                             <button class="additional-filters-toggle" type="button" (click)="toggleAdditionalFilters()">
                                 <svg class="chevron" width="12px" height="12px" fill="currentColor" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg" [class.collapsed]="!additionalFiltersOpen()">
                                     <path d="M0 2l5 6 5-6z"/>
                                 </svg>
-                                <span class="additional-filters-title">Additional Filters and Settings</span>
+                                <span class="additional-filters-title" [class.active]="additionalFiltersHasActiveSettings()">Additional Filters</span>
                             </button>
 
                             @if (additionalFiltersOpen()) {
                                 <div class="additional-filters-panel">
-                                    <div class="additional-filters-header">
+                                    <div class="additional-search-filter">
+                                        <label class="field-label">Search Filter</label>
+                                        <syntax-input
+                                            class="additional-search-input"
+                                            [value]="filtersService.searchText()"
+                                            [tokens]="searchHighlightTokens()"
+                                            [placeholder]="dataService.isDataReady() ? 'Search units...' : 'Loading data...'"
+                                            [disabled]="!dataService.isDataReady()"
+                                            [showClear]="filtersService.searchText().length > 0"
+                                            (valueChange)="onSearchTextChange($event)"
+                                            (cleared)="clearSearchText()" />
+                                    </div>
 
-                                        <div class="pilot-skills-controls">
-                                            @if (isAlphaStrike()) {
-                                            <div class="skill-control">
-                                                <label for="force-generator-gunnery-skill" (click)="openSelect($event, gunnerySelect)">Pilot Skill:</label>
-                                                <select #gunnerySelect id="force-generator-gunnery-skill" class="bt-input skill-select"
-                                                    [class.active]="pilotGunnerySkill() !== 4" [value]="pilotGunnerySkill()"
-                                                    (change)="setPilotSkill('gunnery', +$any($event.target).value)">
-                                                    @for (n of [0,1,2,3,4,5,6,7,8]; track n) {
-                                                    <option [value]="n" [selected]="n === pilotGunnerySkill()">{{ n }}</option>
-                                                    }
-                                                </select>
-                                            </div>
-                                            } @else {
-                                            <div class="skill-control">
-                                                <label for="force-generator-gunnery-skill" (click)="openSelect($event, gunnerySelect)">Gunnery:</label>
-                                                <select #gunnerySelect id="force-generator-gunnery-skill" class="bt-input skill-select"
-                                                    [class.active]="pilotGunnerySkill() !== 4" [value]="pilotGunnerySkill()"
-                                                    (change)="setPilotSkill('gunnery', +$any($event.target).value)">
-                                                    @for (n of [0,1,2,3,4,5,6,7,8]; track n) {
-                                                    <option [value]="n" [selected]="n === pilotGunnerySkill()">{{ n }}</option>
-                                                    }
-                                                </select>
-                                            </div>
-                                            <div class="skill-control">
-                                                <label for="force-generator-piloting-skill" (click)="openSelect($event, pilotingSelect)">Piloting:</label>
-                                                <select #pilotingSelect id="force-generator-piloting-skill" class="bt-input skill-select"
-                                                    [class.active]="pilotPilotingSkill() !== 5" [value]="pilotPilotingSkill()"
-                                                    (change)="setPilotSkill('piloting', +$any($event.target).value)">
-                                                    @for (n of [0,1,2,3,4,5,6,7,8]; track n) {
-                                                    <option [value]="n" [selected]="n === pilotPilotingSkill()">{{ n }}</option>
-                                                    }
-                                                </select>
-                                            </div>
-                                            }
-                                        </div>
-    
+                                    <div class="additional-filters-header">
                                         <div class="additional-filters-actions">
+                                            <span class="adv-filter-system-toggle-description">{{ advPanelFilterGameSystemToggleTitle() }}</span>
                                             <button type="button" class="bt-button square adv-filter-system-toggle"
                                                 [class.active]="otherAdvPanelFilterGameSystemHasActiveFilters()"
                                                 [title]="advPanelFilterGameSystemToggleTitle()"
@@ -289,6 +389,7 @@
                                         [filterGameSystem]="advPanelFilterGameSystem()"
                                         [excludedFilterKeys]="additionalFiltersExcludedKeys()"
                                         [columnsCount]="1"
+                                        [showFormationTargetFilter]="false"
                                         [showAvailabilitySourceDisclaimer]="true">
                                     </unit-search-advanced-filters>
                                 </div>
@@ -297,14 +398,36 @@
                     </div>
 
                     <div class="form-fields span-all">
-                        <label class="generator-option">
-                            <input
-                                class="bt-checkbox"
-                                type="checkbox"
-                                [checked]="preventDuplicateChassis()"
-                                (change)="onPreventDuplicateChassisChange($event)" />
-                            <span class="generator-option-label">Prevent Duplicate Chassis</span>
-                        </label>
+                        <div class="generator-option-list">
+                            <label class="generator-option">
+                                <input
+                                    class="bt-checkbox"
+                                    type="checkbox"
+                                    [checked]="preventDuplicateChassis()"
+                                    (change)="onPreventDuplicateChassisChange($event)" />
+                                <span class="generator-option-label" [tooltip]="preventDuplicateChassisTooltip()">Prevent Duplicate Chassis</span>
+                            </label>
+
+                            <label class="generator-option">
+                                <input
+                                    class="bt-checkbox"
+                                    type="checkbox"
+                                    [checked]="useTaggedQuantities()"
+                                    (change)="onUseTaggedQuantitiesChange($event)" />
+                                <span class="generator-option-label" [tooltip]="useTaggedQuantitiesTooltip()">Limit to tagged quantities</span>
+                            </label>
+
+                            @if (useTaggedQuantities()) {
+                                <label class="generator-option unit-tags-as-chassis-option">
+                                    <input
+                                        class="bt-checkbox"
+                                        type="checkbox"
+                                        [checked]="useUnitTagsAsChassisTags()"
+                                        (change)="onUseUnitTagsAsChassisTagsChange($event)" />
+                                    <span class="generator-option-label" [tooltip]="useUnitTagsAsChassisTagsTooltip()">Use Unit-variant tags as Chassis tags</span>
+                                </label>
+                            }
+                        </div>
                     </div>
 
                     <div class="eligible-count">
@@ -317,20 +440,22 @@
                 </div>
             </section>
 
-            <section class="panel preview-panel">
+            <section class="panel preview-panel" [attr.aria-busy]="forceGenerationInProgress()">
                 <div class="preview-body">
                     @if (previewEntry(); as previewForceEntry) {
                         <div class="preview-layout">
                             <div class="preview-summary">
                                 <force-preview-panel
                                     [force]="previewForceEntry"
-                                    [showHint]="false"
+                                    [showHint]="false"                    
+                                    [showNote]="false"
                                     [scrollUnitsOnly]="true"
                                     [showLockControls]="true"
                                     [showSelectionControls]="true"
                                     [selectionMode]="'single'"
                                     [lockedUnitKeys]="lockedUnitKeys()"
                                     [lockToggle]="previewLockToggle"
+                                    [variantChange]="previewVariantChange"
                                     (hoveredUnitChange)="onPreviewUnitHover($event)"
                                     (selectedUnitsChange)="onPreviewSelectedUnitsChange($event)">
                                 </force-preview-panel>
@@ -370,13 +495,26 @@
                         </div>
                     }
                 </div>
+
             </section>
         </div>
+
+        @if (forceGenerationInProgress()) {
+            <div class="force-generation-overlay">
+                <button
+                    class="bt-button force-generation-terminate"
+                    type="button"
+                    [disabled]="forceGenerationTerminateRequested()"
+                    (click)="terminateForceGeneration()">
+                    INTERRUPT GENERATION
+                </button>
+            </div>
+        }
     </div>
 
     <div dialog-footer class="footer">
-        <button class="modal-btn bt-button" type="button" (click)="submit()" [disabled]="previewError() !== null || previewEntry() === null">CREATE</button>
-        <button class="modal-btn bt-button" type="button" (click)="reroll()" [disabled]="eligibleUnits().length === 0">REROLL</button>
+        <button class="modal-btn bt-button" type="button" (click)="submit()" [disabled]="forceGenerationInProgress() || previewError() !== null || previewEntry() === null">CREATE</button>
+        <button class="modal-btn bt-button" type="button" (click)="reroll()" [disabled]="forceGenerationInProgress() || eligibleUnits().length === 0">REROLL</button>
         <button class="modal-btn bt-button" type="button" (click)="dismiss()">DISMISS</button>
     </div>
 </base-dialog>

@@ -9,12 +9,13 @@ import type { Unit } from '../../models/units.model';
 import { SearchForceGeneratorDialogComponent } from './search-force-generator-dialog.component';
 import { DataService } from '../../services/data.service';
 import { ForceBuilderService } from '../../services/force-builder.service';
-import { ForceGeneratorService } from '../../services/force-generator.service';
+import { ForceGeneratorService, type ForceGenerationPreview } from '../../services/force-generator.service';
 import { GameService } from '../../services/game.service';
 import { OptionsService } from '../../services/options.service';
 import { DialogsService } from '../../services/dialogs.service';
 import { UnitSearchFiltersService } from '../../services/unit-search-filters.service';
 import { WsService } from '../../services/ws.service';
+import { createEmptyUnit } from '../../testing/unit-test-helpers';
 
 describe('SearchForceGeneratorDialogComponent', () => {
     let component: SearchForceGeneratorDialogComponent;
@@ -22,20 +23,25 @@ describe('SearchForceGeneratorDialogComponent', () => {
     let requestClosePanelsSpy: jasmine.Spy;
     let setOptionSpy: jasmine.Spy;
     let setFilterSpy: jasmine.Spy;
+    let getDropdownOptionsForFormationTargetSpy: jasmine.Spy;
     let setPilotSkillsSpy: jasmine.Spy;
     let buildPreviewSpy: jasmine.Spy;
     let createForceEntrySpy: jasmine.Spy;
+    let createForceEntryFromPreviewEntrySpy: jasmine.Spy;
     let createForcePreviewEntrySpy: jasmine.Spy;
     let resolveGenerationContextSpy: jasmine.Spy;
     let resolveInitialBudgetDefaultsSpy: jasmine.Spy;
     let sendWsMessageSpy: jasmine.Spy;
+    let optionsSignal: WritableSignal<any>;
     let advOptionsSignal: WritableSignal<any>;
+    let effectiveFilterStateSignal: WritableSignal<any>;
     let filteredUnitsSignal: WritableSignal<Unit[]>;
     let forceGeneratorEligibleUnitsSignal: WritableSignal<Unit[]>;
     let gameSystemSignal: WritableSignal<GameSystem>;
+    let searchTextSignal: WritableSignal<string>;
 
     beforeEach(() => {
-        const optionsSignal = signal({
+        optionsSignal = signal({
             availabilitySource: 'mul',
             forceGenLastBVMin: 7900,
             forceGenLastBVMax: 8000,
@@ -43,9 +49,17 @@ describe('SearchForceGeneratorDialogComponent', () => {
             forceGenLastPVMax: 300,
             forceGenLastMinUnitCount: 4,
             forceGenLastMaxUnitCount: 8,
+            forceGenLastGunnerySkillMin: 4,
+            forceGenLastGunnerySkillMax: 4,
+            forceGenLastPilotingSkillMin: 5,
+            forceGenLastPilotingSkillMax: 5,
+            forceGenLastMaxPilotSkillDelta: 1,
+            forceGenPreventDuplicateChassis: false,
+            forceGenUseTaggedQuantities: false,
+            forceGenUseUnitTagsAsChassisTags: false,
         });
 
-        setOptionSpy = jasmine.createSpy('setOption').and.callFake((key: string, value: number) => {
+        setOptionSpy = jasmine.createSpy('setOption').and.callFake((key: string, value: unknown) => {
             optionsSignal.update((options) => ({ ...options, [key]: value }));
             return Promise.resolve();
         });
@@ -53,8 +67,10 @@ describe('SearchForceGeneratorDialogComponent', () => {
         dialogCloseSpy = jasmine.createSpy('close');
         requestClosePanelsSpy = jasmine.createSpy('requestClosePanels');
         setFilterSpy = jasmine.createSpy('setFilter');
+        getDropdownOptionsForFormationTargetSpy = jasmine.createSpy('getDropdownOptionsForFormationTarget').and.returnValue(null);
         const pilotGunnerySkillSignal = signal(4);
         const pilotPilotingSkillSignal = signal(5);
+        searchTextSignal = signal('');
         setPilotSkillsSpy = jasmine.createSpy('setPilotSkills').and.callFake((gunnery: number, piloting: number) => {
             pilotGunnerySkillSignal.set(gunnery);
             pilotPilotingSkillSignal.set(piloting);
@@ -122,14 +138,17 @@ describe('SearchForceGeneratorDialogComponent', () => {
                 interacted: false,
             },
         });
+        effectiveFilterStateSignal = signal({});
 
         const currentForceSignal = signal<any>(null);
         filteredUnitsSignal = signal<Unit[]>([]);
         forceGeneratorEligibleUnitsSignal = signal<Unit[]>([]);
         const unitsByName = new Map<string, Unit>();
+        const factionsByName = new Map<string, any>();
         const dataServiceMock = {
             isDataReady: signal(true),
             getUnitByName: jasmine.createSpy('getUnitByName').and.callFake((name: string) => unitsByName.get(name)),
+            getFactionByName: jasmine.createSpy('getFactionByName').and.callFake((name: string) => factionsByName.get(name)),
             getFactionById: jasmine.createSpy('getFactionById').and.returnValue(null),
             getEraById: jasmine.createSpy('getEraById').and.returnValue(null),
         };
@@ -168,7 +187,7 @@ describe('SearchForceGeneratorDialogComponent', () => {
                 cloud: false,
                 local: false,
                 missing: false,
-                name: 'Generated Preview',
+                name: preview.name ?? 'Generated Preview',
                 faction: preview.faction,
                 era: preview.era,
                 bv: preview.gameSystem === GameSystem.CLASSIC ? preview.totalCost : undefined,
@@ -208,10 +227,35 @@ describe('SearchForceGeneratorDialogComponent', () => {
                 }],
             } as LoadForceEntry;
         });
+        createForceEntryFromPreviewEntrySpy = jasmine.createSpy('createForceEntryFromPreviewEntry').and.callFake((previewEntry: ForcePreviewEntry) => {
+            if (previewEntry.groups.length === 0) {
+                return null;
+            }
+
+            return {
+                ...previewEntry,
+                groups: previewEntry.groups.map((group) => ({
+                    name: group.name,
+                    formationId: group.formationId,
+                    units: group.units.map((unit) => ({ ...unit })),
+                })),
+            } as LoadForceEntry;
+        });
 
         const forceGeneratorServiceMock = {
             resolveInitialBudgetDefaults: resolveInitialBudgetDefaultsSpy,
             resolveInitialUnitCountDefaults: () => ({ min: 4, max: 8 }),
+            resolveInitialSkillDefaults: (options: any) => ({
+                gunnery: {
+                    min: Math.min(options.forceGenLastGunnerySkillMin, options.forceGenLastGunnerySkillMax),
+                    max: Math.max(options.forceGenLastGunnerySkillMin, options.forceGenLastGunnerySkillMax),
+                },
+                piloting: {
+                    min: Math.min(options.forceGenLastPilotingSkillMin, options.forceGenLastPilotingSkillMax),
+                    max: Math.max(options.forceGenLastPilotingSkillMin, options.forceGenLastPilotingSkillMax),
+                },
+                maxDelta: options.forceGenLastMaxPilotSkillDelta,
+            }),
             resolveBudgetRangeForEditedMin: (range: { min: number; max: number }, editedMin: number) => {
                 const nextMin = Math.max(0, Math.floor(editedMin));
                 const nextMax = range.max > 0
@@ -249,10 +293,18 @@ describe('SearchForceGeneratorDialogComponent', () => {
                 min: 'forceGenLastBVMin',
                 max: 'forceGenLastBVMax',
             }),
+            getStoredSkillOptionKeys: () => ({
+                gunneryMin: 'forceGenLastGunnerySkillMin',
+                gunneryMax: 'forceGenLastGunnerySkillMax',
+                pilotingMin: 'forceGenLastPilotingSkillMin',
+                pilotingMax: 'forceGenLastPilotingSkillMax',
+                maxDelta: 'forceGenLastMaxPilotSkillDelta',
+            }),
             resolveGenerationContext: resolveGenerationContextSpy,
             buildPreview: buildPreviewSpy,
             createForcePreviewEntry: createForcePreviewEntrySpy,
             createForceEntry: createForceEntrySpy,
+            createForceEntryFromPreviewEntry: createForceEntryFromPreviewEntrySpy,
             getBudgetMetric: (unit: Unit, gameSystem: GameSystem) => {
                 return gameSystem === GameSystem.ALPHA_STRIKE ? unit.as?.PV ?? 0 : unit.bv ?? 0;
             },
@@ -305,14 +357,15 @@ describe('SearchForceGeneratorDialogComponent', () => {
                         advOptions: advOptionsSignal,
                         bvPvLimit: signal(5000),
                         closePanelsRequest: signal({ requestId: 0, exitExpandedView: false }),
-                        effectiveFilterState: signal({}),
+                        effectiveFilterState: effectiveFilterStateSignal,
                         filteredUnits: filteredUnitsSignal,
                         forceGeneratorEligibleUnits: forceGeneratorEligibleUnitsSignal,
                         isComplexQuery: signal(false),
                         pilotGunnerySkill: pilotGunnerySkillSignal,
                         pilotPilotingSkill: pilotPilotingSkillSignal,
+                        getDropdownOptionsForFormationTarget: getDropdownOptionsForFormationTargetSpy,
                         requestClosePanels: requestClosePanelsSpy,
-                        searchText: signal(''),
+                        searchText: searchTextSignal,
                         setFilter: setFilterSpy,
                         setPilotSkills: setPilotSkillsSpy,
                         unsetFilter: jasmine.createSpy('unsetFilter'),
@@ -343,6 +396,7 @@ describe('SearchForceGeneratorDialogComponent', () => {
             __test: {
                 currentForceSignal,
                 unitsByName,
+                factionsByName,
                 setPreviewResult(nextPreviewResult: typeof previewResult) {
                     previewResult = nextPreviewResult;
                 },
@@ -361,21 +415,59 @@ describe('SearchForceGeneratorDialogComponent', () => {
         expect(component.previewError()).toBe('Press REROLL to generate a force preview for the current settings.');
     });
 
+    it('uses the stored force generator skill defaults', async () => {
+        optionsSignal.update((options) => ({
+            ...options,
+            forceGenLastGunnerySkillMin: 2,
+            forceGenLastGunnerySkillMax: 4,
+            forceGenLastPilotingSkillMin: 3,
+            forceGenLastPilotingSkillMax: 6,
+            forceGenLastMaxPilotSkillDelta: 2,
+        }));
+
+        const fixture = TestBed.createComponent(SearchForceGeneratorDialogComponent);
+        await fixture.whenStable();
+        fixture.detectChanges();
+
+        const dialog = fixture.componentInstance;
+        expect(dialog.gunnerySkillRange()).toEqual([2, 4]);
+        expect(dialog.pilotingSkillRange()).toEqual([3, 6]);
+        expect(dialog.maxPilotSkillDelta()).toBe(2);
+    });
+
+    it('uses the stored force generator checkbox defaults', async () => {
+        optionsSignal.update((options) => ({
+            ...options,
+            forceGenPreventDuplicateChassis: true,
+            forceGenUseTaggedQuantities: true,
+            forceGenUseUnitTagsAsChassisTags: true,
+        }));
+
+        const fixture = TestBed.createComponent(SearchForceGeneratorDialogComponent);
+        await fixture.whenStable();
+        fixture.detectChanges();
+
+        const dialog = fixture.componentInstance;
+        expect(dialog.preventDuplicateChassis()).toBeTrue();
+        expect(dialog.useTaggedQuantities()).toBeFalse();
+        expect(dialog.useUnitTagsAsChassisTags()).toBeTrue();
+    });
+
     it('uses uncapped force-generator eligible units for preview requests', () => {
-        const limitedUnit = {
+        const limitedUnit = createEmptyUnit({
             id: 1,
             name: 'Limited Unit',
             chassis: 'Limited',
             model: 'Prime',
             as: { PV: 25 },
-        } as Unit;
-        const extraEligibleUnit = {
+        });
+        const extraEligibleUnit = createEmptyUnit({
             id: 2,
             name: 'Extra Eligible Unit',
             chassis: 'Extra',
             model: 'Prime',
             as: { PV: 40 },
-        } as Unit;
+        });
 
         filteredUnitsSignal.set([limitedUnit]);
         forceGeneratorEligibleUnitsSignal.set([limitedUnit, extraEligibleUnit]);
@@ -387,6 +479,7 @@ describe('SearchForceGeneratorDialogComponent', () => {
         expect(buildPreviewSpy.calls.mostRecent().args[0].eligibleUnits).toEqual([limitedUnit, extraEligibleUnit]);
         expect(createForcePreviewEntrySpy).toHaveBeenCalled();
         expect(createForceEntrySpy).not.toHaveBeenCalled();
+        expect(createForceEntryFromPreviewEntrySpy).not.toHaveBeenCalled();
     });
 
     it('does not lower the min units while typing a larger max until blur', async () => {
@@ -453,14 +546,14 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('does not replace the displayed preview when max units are committed on blur', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 7950,
             as: { PV: 54 },
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.CLASSIC,
@@ -524,14 +617,14 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('does not replace the displayed preview when max budget is committed on blur', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 7950,
             as: { PV: 54 },
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.CLASSIC,
@@ -610,17 +703,56 @@ describe('SearchForceGeneratorDialogComponent', () => {
         expect(setFilterSpy).toHaveBeenCalledWith('subtype', ['Combat Vehicle']);
     });
 
-    it('keeps shared filter mappings stable when the generator mode changes locally', () => {
+    it('uses the local generator mode for unit type and subtype filters', () => {
+        expect(component.additionalFiltersExcludedKeys()).toContain('type');
+        expect(component.additionalFiltersExcludedKeys()).toContain('subtype');
+        expect(component.additionalFiltersExcludedKeys()).not.toContain('as.TP');
+
         component.setGameSystem(GameSystem.ALPHA_STRIKE);
 
         expect(component.gameSystem()).toBe(GameSystem.ALPHA_STRIKE);
         expect(gameSystemSignal()).toBe(GameSystem.CLASSIC);
-        expect(component.selectedUnitTypeValues()).toEqual(['Mek']);
-        expect(component.selectedSubtypeValues()).toEqual(['BattleMek']);
+        expect(component.selectedUnitTypeValues()).toEqual(['BM']);
+        expect(component.selectedSubtypeValues()).toEqual([]);
+        expect(component.additionalFiltersExcludedKeys()).toContain('as.TP');
+        expect(component.additionalFiltersExcludedKeys()).not.toContain('type');
+        expect(component.additionalFiltersExcludedKeys()).not.toContain('subtype');
 
-        component.onUnitTypeSelectionChange(['Tank']);
+        component.onUnitTypeSelectionChange(['CV']);
 
-        expect(setFilterSpy).toHaveBeenCalledWith('type', ['Tank']);
+        expect(setFilterSpy).toHaveBeenCalledWith('as.TP', ['CV']);
+    });
+
+    it('highlights the advanced system toggle only for active filters hidden behind it', () => {
+        component.advPanelFilterGameSystem.set(GameSystem.ALPHA_STRIKE);
+        effectiveFilterStateSignal.set({
+            type: { interactedWith: true },
+            subtype: { interactedWith: true },
+        });
+
+        expect(component.otherAdvPanelFilterGameSystem()).toBe(GameSystem.CLASSIC);
+        expect(component.otherAdvPanelFilterGameSystemHasActiveFilters()).toBeFalse();
+
+        component.advPanelFilterGameSystem.set(GameSystem.CLASSIC);
+        effectiveFilterStateSignal.set({
+            'as.TP': { interactedWith: true },
+        });
+
+        expect(component.otherAdvPanelFilterGameSystem()).toBe(GameSystem.ALPHA_STRIKE);
+        expect(component.otherAdvPanelFilterGameSystemHasActiveFilters()).toBeTrue();
+
+        component.setGameSystem(GameSystem.ALPHA_STRIKE);
+
+        expect(component.otherAdvPanelFilterGameSystemHasActiveFilters()).toBeFalse();
+
+        component.advPanelFilterGameSystem.set(GameSystem.ALPHA_STRIKE);
+        effectiveFilterStateSignal.set({
+            type: { interactedWith: true },
+            subtype: { interactedWith: true },
+        });
+
+        expect(component.otherAdvPanelFilterGameSystem()).toBe(GameSystem.CLASSIC);
+        expect(component.otherAdvPanelFilterGameSystemHasActiveFilters()).toBeTrue();
     });
 
     it('uses the local generator mode for preview requests without changing the global game system', () => {
@@ -633,13 +765,13 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('records successful force generations over websocket when reroll produces a preview', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 11,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 1897,
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.CLASSIC,
@@ -679,20 +811,20 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('imports the current force into the locked preview without rerolling', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             as: { PV: 6 },
-        } as Unit;
-        const locust = {
+        });
+        const locust = createEmptyUnit({
             id: 2,
             name: 'Locust LCT-1V',
             chassis: 'Locust',
             model: 'LCT-1V',
             as: { PV: 4 },
-        } as Unit;
+        });
         const testState = (component as any).__test;
         const serializeSpy = jasmine.createSpy('serialize');
         const liveUnit1 = {
@@ -737,23 +869,26 @@ describe('SearchForceGeneratorDialogComponent', () => {
         expect(serializeSpy).not.toHaveBeenCalled();
         expect(component.canImportCurrentForce()).toBeTrue();
         expect(component.lockedUnitKeys().size).toBe(2);
-        expect(component.lockedUnitKeys().has('u-1')).toBeTrue();
-        expect(component.lockedUnitKeys().has('u-2')).toBeTrue();
+        const previewLockKeys = preview.units.map((unit) => unit.lockKey);
+        expect(previewLockKeys.every((lockKey) => !!lockKey)).toBeTrue();
+        expect(previewLockKeys).toHaveSize(2);
+        expect(new Set(previewLockKeys).size).toBe(2);
+        expect(previewLockKeys.every((lockKey) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(lockKey!))).toBeTrue();
+        expect(previewLockKeys.every((lockKey) => component.lockedUnitKeys().has(lockKey!))).toBeTrue();
         expect(preview.units.map((unit) => unit.unit.name)).toEqual([atlas.name, locust.name]);
-        expect(preview.units.map((unit) => unit.lockKey)).toEqual(['u-1', 'u-2']);
         expect(preview.explanationLines).toContain('Imported current force into preview. Press REROLL to generate a new result for the current settings.');
         expect(buildPreviewSpy).not.toHaveBeenCalled();
         expect(sendWsMessageSpy).not.toHaveBeenCalled();
     });
 
-    it('uses the preview adapter for rendering and the load entry adapter only on submit', () => {
-        const atlas = {
+    it('submits the rendered preview entry without rebuilding its groups', () => {
+        const atlas = createEmptyUnit({
             id: 4,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 1897,
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.CLASSIC,
@@ -772,10 +907,11 @@ describe('SearchForceGeneratorDialogComponent', () => {
         });
 
         component.reroll();
-        component.previewEntry();
+        const renderedEntry = component.previewEntry();
 
         expect(createForcePreviewEntrySpy).toHaveBeenCalledTimes(1);
         expect(createForceEntrySpy).not.toHaveBeenCalled();
+        expect(createForceEntryFromPreviewEntrySpy).not.toHaveBeenCalled();
 
         component.minUnitCount.set(1);
         component.maxUnitCount.set(1);
@@ -783,17 +919,18 @@ describe('SearchForceGeneratorDialogComponent', () => {
         component.classicBudgetMax.set(0);
         component.submit();
 
-        expect(createForceEntrySpy).toHaveBeenCalledTimes(1);
+        expect(createForceEntrySpy).not.toHaveBeenCalled();
+        expect(createForceEntryFromPreviewEntrySpy).toHaveBeenCalledOnceWith(renderedEntry);
         expect(dialogCloseSpy).toHaveBeenCalledTimes(1);
     });
 
     it('clears the hovered radar overlay when rerolling a new preview', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 3,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
-        } as Unit;
+        });
 
         component.onPreviewUnitHover({
             unit: atlas,
@@ -808,13 +945,13 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('requests the unit search to close when CREATE submits a generated force', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 4,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 1897,
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.CLASSIC,
@@ -850,10 +987,139 @@ describe('SearchForceGeneratorDialogComponent', () => {
         } as unknown as Event);
 
         expect(buildPreviewSpy).not.toHaveBeenCalled();
+        expect(setOptionSpy).toHaveBeenCalledOnceWith('forceGenPreventDuplicateChassis', true);
 
         component.reroll();
 
         expect(buildPreviewSpy.calls.mostRecent().args[0].preventDuplicateChassis).toBeTrue();
+    });
+
+    it('unchecks tagged quantities when duplicate-chassis prevention is checked', () => {
+        component.onUseTaggedQuantitiesChange({
+            target: { checked: true },
+        } as unknown as Event);
+        setOptionSpy.calls.reset();
+
+        component.onPreventDuplicateChassisChange({
+            target: { checked: true },
+        } as unknown as Event);
+
+        expect(component.preventDuplicateChassis()).toBeTrue();
+        expect(component.useTaggedQuantities()).toBeFalse();
+        expect(setOptionSpy.calls.allArgs()).toEqual([
+            ['forceGenPreventDuplicateChassis', true],
+            ['forceGenUseTaggedQuantities', false],
+        ]);
+    });
+
+    it('stores and forwards the tagged-quantities checkbox state', () => {
+        component.onUseTaggedQuantitiesChange({
+            target: { checked: true },
+        } as unknown as Event);
+
+        expect(buildPreviewSpy).not.toHaveBeenCalled();
+        expect(setOptionSpy).toHaveBeenCalledOnceWith('forceGenUseTaggedQuantities', true);
+
+        component.reroll();
+
+        expect(buildPreviewSpy.calls.mostRecent().args[0].useTaggedQuantities).toBeTrue();
+    });
+
+    it('forwards the current search settings into the preview request', () => {
+        searchTextSignal.set('atlas !primitive');
+
+        component.reroll();
+
+        expect(buildPreviewSpy.calls.mostRecent().args[0].searchSettings).toEqual([
+            'Search settings: query "atlas !primitive"; filters Era Jihad | Type Mek | Subtype BattleMek | Type BM.',
+        ]);
+    });
+
+    it('expands AND tag selections in the forwarded search settings', () => {
+        advOptionsSignal.update((options) => ({
+            ...options,
+            _tags: {
+                type: 'dropdown' as const,
+                label: 'Tags',
+                options: [
+                    { name: 'Official' },
+                    { name: 'Want' },
+                    { name: 'CGB' },
+                ],
+                value: {
+                    Official: { name: 'Official', state: 'or' as const, count: 1 },
+                    Want: { name: 'Want', state: 'or' as const, count: 1 },
+                    CGB: { name: 'CGB', state: 'and' as const, count: 1 },
+                },
+                interacted: true,
+            },
+        }));
+
+        component.reroll();
+
+        expect(buildPreviewSpy.calls.mostRecent().args[0].searchSettings).toEqual([
+            'Search settings: filters Era Jihad | Type Mek | Subtype BattleMek | Type BM | Tags Official, Want, CGB.',
+        ]);
+    });
+
+    it('omits query from search settings when the search query is empty', () => {
+        component.reroll();
+
+        expect(buildPreviewSpy.calls.mostRecent().args[0].searchSettings).toEqual([
+            'Search settings: filters Era Jihad | Type Mek | Subtype BattleMek | Type BM.',
+        ]);
+    });
+
+    it('renders the unit-tags-as-chassis checkbox only when tagged quantities are active', async () => {
+        const fixture = TestBed.createComponent(SearchForceGeneratorDialogComponent);
+        await fixture.whenStable();
+        fixture.detectChanges();
+
+        expect(fixture.nativeElement.querySelector('.unit-tags-as-chassis-option')).toBeNull();
+
+        fixture.componentInstance.onUseTaggedQuantitiesChange({
+            target: { checked: true },
+        } as unknown as Event);
+        fixture.detectChanges();
+
+        expect(fixture.nativeElement.querySelector('.unit-tags-as-chassis-option')).not.toBeNull();
+    });
+
+    it('stores and forwards the unit-tags-as-chassis checkbox state', () => {
+        component.onUseTaggedQuantitiesChange({
+            target: { checked: true },
+        } as unknown as Event);
+        setOptionSpy.calls.reset();
+
+        component.onUseUnitTagsAsChassisTagsChange({
+            target: { checked: true },
+        } as unknown as Event);
+
+        expect(buildPreviewSpy).not.toHaveBeenCalled();
+        expect(setOptionSpy).toHaveBeenCalledOnceWith('forceGenUseUnitTagsAsChassisTags', true);
+
+        component.reroll();
+
+        expect(buildPreviewSpy.calls.mostRecent().args[0].useTaggedQuantities).toBeTrue();
+        expect(buildPreviewSpy.calls.mostRecent().args[0].useUnitTagsAsChassisTags).toBeTrue();
+    });
+
+    it('unchecks duplicate-chassis prevention when tagged quantities is checked', () => {
+        component.onPreventDuplicateChassisChange({
+            target: { checked: true },
+        } as unknown as Event);
+        setOptionSpy.calls.reset();
+
+        component.onUseTaggedQuantitiesChange({
+            target: { checked: true },
+        } as unknown as Event);
+
+        expect(component.useTaggedQuantities()).toBeTrue();
+        expect(component.preventDuplicateChassis()).toBeFalse();
+        expect(setOptionSpy.calls.allArgs()).toEqual([
+            ['forceGenUseTaggedQuantities', true],
+            ['forceGenPreventDuplicateChassis', false],
+        ]);
     });
 
     it('renders the Multi-Era checkbox disabled for a single positive era selection', async () => {
@@ -965,7 +1231,208 @@ describe('SearchForceGeneratorDialogComponent', () => {
 
         expect(resolveGenerationContextSpy).toHaveBeenCalledWith(
             [],
-            { crossEraAvailabilityInMultiEraSelection: true },
+            jasmine.objectContaining({
+                crossEraAvailabilityInMultiEraSelection: true,
+                gameSystem: component.gameSystem(),
+                targetFormationId: undefined,
+                targetFormations: [],
+            }),
+        );
+    });
+
+    it('adds a generator-local Random option to the faction dropdown', () => {
+        advOptionsSignal.update((options) => ({
+            ...options,
+            faction: {
+                ...options.faction,
+                options: [
+                    { name: 'Federated Suns' },
+                    { name: 'Lyran Alliance' },
+                ],
+            },
+        }));
+
+        const randomOption = component.targetFormationFactionOptions()[0];
+
+        expect(randomOption).toEqual(jasmine.objectContaining({
+            displayName: 'Random',
+            img: '/images/random.svg',
+            alwaysVisible: true,
+            exclusive: true,
+            stateCycle: ['or'],
+        }));
+    });
+
+    it('keeps Random faction selection out of the real faction filter and forwards it to context resolution', () => {
+        const randomOptionName = component.targetFormationFactionOptions()[0].name;
+
+        component.onFactionSelectionChange({
+            [randomOptionName]: {
+                name: randomOptionName,
+                state: 'or',
+                count: 1,
+            },
+            'Federated Suns': {
+                name: 'Federated Suns',
+                state: 'or',
+                count: 1,
+            },
+        });
+
+        expect(component.randomFactionSelected()).toBeTrue();
+        expect(component.selectedFactionValues()).toEqual({
+            [randomOptionName]: {
+                name: randomOptionName,
+                state: 'or',
+                count: 1,
+            },
+        });
+        expect(setFilterSpy).toHaveBeenCalledOnceWith('faction', {});
+
+        component.reroll();
+
+        expect(resolveGenerationContextSpy).toHaveBeenCalledWith(
+            [],
+            jasmine.objectContaining({
+                randomFaction: true,
+                mergeSelectedFactionAvailability: true,
+            }),
+        );
+    });
+
+    it('does not filter faction-specific target formations while Random faction is selected', () => {
+        advOptionsSignal.update((options) => ({
+            ...options,
+            faction: {
+                ...options.faction,
+                options: [
+                    { name: 'Free Worlds League' },
+                    { name: 'Federated Suns' },
+                ],
+            },
+        }));
+        const randomOptionName = component.targetFormationFactionOptions()[0].name;
+
+        component.onFactionSelectionChange({
+            [randomOptionName]: {
+                name: randomOptionName,
+                state: 'or',
+                count: 1,
+            },
+        });
+
+        const formationIds = new Set(component.targetFormationOptions().map((option) => option.name));
+
+        expect(formationIds.has('anvil-lance')).toBeTrue();
+        expect(formationIds.has('rifle-lance')).toBeTrue();
+    });
+
+    it('forwards disabled selected-faction availability merging to context resolution', () => {
+        advOptionsSignal.update((options) => ({
+            ...options,
+            faction: {
+                ...options.faction,
+                options: [
+                    { name: 'Federated Suns' },
+                    { name: 'Lyran Alliance' },
+                ],
+                value: {
+                    fs: { name: 'Federated Suns', state: 'or' as const, count: 1 },
+                    la: { name: 'Lyran Alliance', state: 'or' as const, count: 1 },
+                },
+                interacted: true,
+            },
+        }));
+
+        expect(component.selectedFactionAvailabilityMergeToggleVisible()).toBeTrue();
+
+        component.onMergeSelectedFactionAvailabilityChange({
+            target: { checked: false },
+        } as unknown as Event);
+        component.reroll();
+
+        expect(resolveGenerationContextSpy).toHaveBeenCalledWith(
+            [],
+            jasmine.objectContaining({
+                randomFaction: false,
+                mergeSelectedFactionAvailability: false,
+            }),
+        );
+    });
+
+
+    it('disambiguates duplicate target formation names in the generator dropdown', () => {
+        gameSystemSignal.set(GameSystem.ALPHA_STRIKE);
+
+        const displayNameById = new Map(component.targetFormationOptions().map((option) => [
+            option.name,
+            option.displayName ?? option.name,
+        ]));
+
+        expect(displayNameById.get('fire-support-lance')).toBe('Fire Support');
+        expect(displayNameById.get('fire-support-squadron')).toBe('Fire Support [Aero]');
+        expect(displayNameById.get('interceptor-squadron')).toBe('Interceptor [Aero]');
+    });
+
+    it('limits faction dropdown availability by selected target formations in the generator dialog', () => {
+        advOptionsSignal.update((options) => ({
+            ...options,
+            faction: {
+                ...options.faction,
+                options: [
+                    { name: 'Free Worlds League' },
+                    { name: 'Federated Suns' },
+                    { name: 'Draconis Combine', available: false },
+                ],
+            },
+        }));
+
+        component.onTargetFormationSelectionChange({
+            'anvil-lance': {
+                name: 'anvil-lance',
+                state: 'or',
+                count: 1,
+            },
+        });
+
+        const optionsByName = new Map(component.targetFormationFactionOptions().map((option) => [option.name, option]));
+
+        expect(optionsByName.get('Free Worlds League')?.available).toBeTrue();
+        expect(optionsByName.get('Federated Suns')?.available).toBeFalse();
+        expect(optionsByName.get('Draconis Combine')?.available).toBeFalse();
+        expect(getDropdownOptionsForFormationTargetSpy).toHaveBeenCalledWith(
+            'faction',
+            jasmine.objectContaining({ id: 'anvil-lance' }),
+        );
+    });
+
+    it('uses formation-projected era dropdown availability in the generator dialog', () => {
+        getDropdownOptionsForFormationTargetSpy.and.callFake((filterKey: string) => (
+            filterKey === 'era'
+                ? [
+                    { name: 'Jihad', available: true },
+                    { name: 'Succession Wars', available: false },
+                    { name: 'Dark Age', available: false },
+                ]
+                : null
+        ));
+
+        component.onTargetFormationSelectionChange({
+            'anvil-lance': {
+                name: 'anvil-lance',
+                state: 'or',
+                count: 1,
+            },
+        });
+
+        const optionsByName = new Map(component.targetFormationEraOptions().map((option) => [option.name, option]));
+
+        expect(optionsByName.get('Jihad')?.available).toBeTrue();
+        expect(optionsByName.get('Succession Wars')?.available).toBeFalse();
+        expect(optionsByName.get('Dark Age')?.available).toBeFalse();
+        expect(getDropdownOptionsForFormationTargetSpy).toHaveBeenCalledWith(
+            'era',
+            jasmine.objectContaining({ id: 'anvil-lance' }),
         );
     });
 
@@ -1013,16 +1480,17 @@ describe('SearchForceGeneratorDialogComponent', () => {
 
         expect(checkbox).not.toBeNull();
         expect(fixture.nativeElement.textContent).toContain('Prevent Duplicate Chassis');
+        expect(fixture.nativeElement.textContent).toContain('Limit to tagged quantities');
     });
 
     it('includes the Multi-Era checkbox state in the submitted config', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 4,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 1897,
-        } as Unit;
+        });
 
         advOptionsSignal.update((options) => ({
             ...options,
@@ -1062,44 +1530,119 @@ describe('SearchForceGeneratorDialogComponent', () => {
         expect(dialogCloseSpy.calls.mostRecent().args[0].config.crossEraAvailabilityInMultiEraSelection).toBeTrue();
     });
 
-    it('renders pilot skill controls and updates them for the current game system', async () => {
+    it('includes tagged-quantity checkbox states in the submitted config', () => {
+        const atlas = createEmptyUnit({
+            id: 4,
+            name: 'Atlas AS7-D',
+            chassis: 'Atlas',
+            model: 'AS7-D',
+            bv: 1897,
+        });
+
+        component.onUseTaggedQuantitiesChange({
+            target: { checked: true },
+        } as unknown as Event);
+        component.onUseUnitTagsAsChassisTagsChange({
+            target: { checked: true },
+        } as unknown as Event);
+
+        (component as any).__test.setPreviewResult({
+            gameSystem: GameSystem.CLASSIC,
+            units: [{
+                unit: atlas,
+                cost: 1897,
+                gunnery: 4,
+                piloting: 5,
+                lockKey: 'generated:0:Atlas AS7-D',
+            }],
+            totalCost: 1897,
+            error: null,
+            faction: null,
+            era: null,
+            explanationLines: [],
+        });
+
+        component.minUnitCount.set(1);
+        component.maxUnitCount.set(1);
+        component.classicBudgetMin.set(0);
+        component.classicBudgetMax.set(0);
+        component.reroll();
+        component.submit();
+
+        expect(dialogCloseSpy).toHaveBeenCalledTimes(1);
+        expect(dialogCloseSpy.calls.mostRecent().args[0].config.useTaggedQuantities).toBeTrue();
+        expect(dialogCloseSpy.calls.mostRecent().args[0].config.useUnitTagsAsChassisTags).toBeTrue();
+    });
+
+    it('renders pilot skill range controls and sends them to preview generation', async () => {
         const fixture = TestBed.createComponent(SearchForceGeneratorDialogComponent);
         await fixture.whenStable();
         fixture.detectChanges();
 
+        const skillToggle = fixture.nativeElement.querySelector('.skill-settings-toggle') as HTMLButtonElement | null;
+        expect(skillToggle).not.toBeNull();
         expect(fixture.nativeElement.querySelector('#force-generator-gunnery-skill')).toBeNull();
-        expect(fixture.nativeElement.querySelector('#force-generator-piloting-skill')).toBeNull();
 
-        const toggle = fixture.nativeElement.querySelector('.additional-filters-toggle') as HTMLButtonElement | null;
-        toggle?.click();
+        skillToggle?.click();
         fixture.detectChanges();
 
         const classicText = fixture.nativeElement.textContent as string;
-        const gunnerySelect = fixture.nativeElement.querySelector('#force-generator-gunnery-skill') as HTMLSelectElement | null;
-        const pilotingSelect = fixture.nativeElement.querySelector('#force-generator-piloting-skill') as HTMLSelectElement | null;
+        const gunneryControl = fixture.nativeElement.querySelector('#force-generator-gunnery-skill') as HTMLElement | null;
+        const pilotingControl = fixture.nativeElement.querySelector('#force-generator-piloting-skill') as HTMLElement | null;
+        const deltaInput = fixture.nativeElement.querySelector('#force-generator-skill-delta') as HTMLInputElement | null;
+        const deltaDescription = fixture.nativeElement.querySelector('.skill-delta-description') as HTMLElement | null;
 
-        expect(classicText).toContain('Gunnery:');
-        expect(classicText).toContain('Piloting:');
-        expect(gunnerySelect).not.toBeNull();
-        expect(pilotingSelect).not.toBeNull();
+        expect(classicText).toContain('Gunnery');
+        expect(classicText).toContain('Piloting');
+        expect(classicText).toContain('Max Delta');
+        expect(gunneryControl).not.toBeNull();
+        expect(pilotingControl).not.toBeNull();
+        expect(deltaInput).not.toBeNull();
+        expect(gunneryControl?.closest('.filter-row')).not.toBeNull();
+        expect(pilotingControl?.closest('.filter-row')).not.toBeNull();
+        expect(gunneryControl?.closest('.range')?.querySelector('.range-values')?.textContent).toContain('4~4');
+        expect(pilotingControl?.closest('.range')?.querySelector('.range-values')?.textContent).toContain('5~5');
+        expect(deltaDescription?.textContent?.trim()).toBe('Maximum allowed difference between generated Gunnery and Piloting.');
+        expect(gunneryControl?.closest('.additional-filters-shell')).toBeNull();
+        expect(pilotingControl?.closest('.additional-filters-shell')).toBeNull();
+        expect(deltaInput?.closest('.additional-filters-shell')).toBeNull();
 
-        if (!gunnerySelect) {
-            fail('Expected gunnery select to be rendered.');
+        if (!deltaInput) {
+            fail('Expected max delta input to be rendered.');
             return;
         }
 
-        gunnerySelect.value = '3';
-        gunnerySelect.dispatchEvent(new Event('change'));
+        fixture.componentInstance.onGunnerySkillRangeChange([3, 5]);
+        fixture.componentInstance.onPilotingSkillRangeChange([4, 6]);
+        deltaInput.value = '2';
+        deltaInput.dispatchEvent(new Event('input'));
         fixture.detectChanges();
 
-        expect(setPilotSkillsSpy).toHaveBeenCalledWith(3, 5);
+        expect(fixture.componentInstance.gunnerySkillRange()).toEqual([3, 5]);
+        expect(fixture.componentInstance.pilotingSkillRange()).toEqual([4, 6]);
+        expect(fixture.componentInstance.maxPilotSkillDelta()).toBe(2);
+        expect(setOptionSpy).toHaveBeenCalledWith('forceGenLastGunnerySkillMin', 3);
+        expect(setOptionSpy).toHaveBeenCalledWith('forceGenLastGunnerySkillMax', 5);
+        expect(setOptionSpy).toHaveBeenCalledWith('forceGenLastPilotingSkillMin', 4);
+        expect(setOptionSpy).toHaveBeenCalledWith('forceGenLastPilotingSkillMax', 6);
+        expect(setOptionSpy).toHaveBeenCalledWith('forceGenLastMaxPilotSkillDelta', 2);
+
+        fixture.componentInstance.reroll();
+
+        expect(buildPreviewSpy.calls.mostRecent().args[0].skillRanges).toEqual({
+            gunnery: { min: 3, max: 5 },
+            piloting: { min: 4, max: 6 },
+            maxDelta: 2,
+        });
 
         fixture.componentInstance.setGameSystem(GameSystem.ALPHA_STRIKE);
         fixture.detectChanges();
 
         const alphaStrikeText = fixture.nativeElement.textContent as string;
-        expect(alphaStrikeText).toContain('Pilot Skill:');
+        expect(alphaStrikeText).toContain('Pilot Skill');
         expect(fixture.nativeElement.querySelector('#force-generator-piloting-skill')).toBeNull();
+        expect(fixture.nativeElement.querySelector('#force-generator-skill-delta')).toBeNull();
+        expect(fixture.nativeElement.querySelector('.skill-delta-description')).toBeNull();
     });
 
     it('shows additional search filters behind an accordion without the force limit block', async () => {
@@ -1117,20 +1660,51 @@ describe('SearchForceGeneratorDialogComponent', () => {
         fixture.detectChanges();
 
         const panel = fixture.nativeElement.querySelector('.additional-filters-panel') as HTMLElement | null;
+        const systemToggleDescription = fixture.nativeElement.querySelector('.adv-filter-system-toggle-description') as HTMLElement | null;
 
-        expect(fixture.nativeElement.textContent).toContain('Additional Filters and Settings');
+        expect(fixture.nativeElement.textContent).toContain('Additional Filters');
         expect(panel).not.toBeNull();
         expect(panel?.textContent).toContain('Tech');
+        expect(systemToggleDescription?.textContent?.trim()).toBe(fixture.componentInstance.advPanelFilterGameSystemToggleTitle());
+    });
+
+    it('highlights skill values separately from advanced filters title', async () => {
+        const fixture = TestBed.createComponent(SearchForceGeneratorDialogComponent);
+        await fixture.whenStable();
+        fixture.detectChanges();
+
+        const title = fixture.nativeElement.querySelector('.additional-filters-title') as HTMLElement | null;
+        const skillsTitle = fixture.nativeElement.querySelector('.skill-settings-title') as HTMLElement | null;
+
+        expect(title?.classList.contains('active')).toBeFalse();
+        expect(skillsTitle?.classList.contains('active')).toBeFalse();
+
+        fixture.componentInstance.setPilotSkill('gunnery', 3);
+        fixture.detectChanges();
+
+        expect(title?.classList.contains('active')).toBeFalse();
+        expect(skillsTitle?.classList.contains('active')).toBeTrue();
+
+        fixture.componentInstance.setPilotSkill('gunnery', 4);
+        effectiveFilterStateSignal.set({
+            bv: {
+                interactedWith: true,
+            },
+        });
+        fixture.detectChanges();
+
+        expect(title?.classList.contains('active')).toBeTrue();
+        expect(skillsTitle?.classList.contains('active')).toBeFalse();
     });
 
     it('toggles preview units in and out of the locked set', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             as: { PV: 6 },
-        } as Unit;
+        });
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.ALPHA_STRIKE,
             units: [{
@@ -1163,15 +1737,73 @@ describe('SearchForceGeneratorDialogComponent', () => {
         expect(component.lockedUnitKeys().has('generated:0:Atlas AS7-D')).toBeFalse();
     });
 
-    it('recomputes locked unit values when switching from Alpha Strike to Classic', () => {
-        const atlas = {
+    it('changes a generated preview unit to a selected variant without rerolling', () => {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 1897,
             as: { PV: 54 },
-        } as Unit;
+        });
+        const atlasVariant = createEmptyUnit({
+            id: 2,
+            name: 'Atlas AS7-K',
+            chassis: 'Atlas',
+            model: 'AS7-K',
+            bv: 2200,
+            as: { PV: 60 },
+        });
+
+        (component as any).__test.setPreviewResult({
+            gameSystem: GameSystem.CLASSIC,
+            units: [{
+                unit: atlas,
+                cost: 1897,
+                gunnery: 3,
+                piloting: 4,
+                lockKey: 'generated:0:Atlas AS7-D',
+            }],
+            totalCost: 1897,
+            error: null,
+            faction: null,
+            era: null,
+            explanationLines: [],
+        });
+
+        component.reroll();
+        buildPreviewSpy.calls.reset();
+        component.previewVariantChange({
+            unit: atlas,
+            destroyed: false,
+            gunnery: 3,
+            piloting: 4,
+            lockKey: 'generated:0:Atlas AS7-D',
+        }, atlasVariant);
+
+        const preview = component.preview();
+        expect(buildPreviewSpy).not.toHaveBeenCalled();
+        expect(preview.totalCost).toBe(2200);
+        expect(preview.units).toEqual([
+            jasmine.objectContaining({
+                unit: atlasVariant,
+                cost: 2200,
+                gunnery: 3,
+                piloting: 4,
+                lockKey: 'generated:0:Atlas AS7-D',
+            }),
+        ]);
+    });
+
+    it('recomputes locked unit values when switching from Alpha Strike to Classic', () => {
+        const atlas = createEmptyUnit({
+            id: 1,
+            name: 'Atlas AS7-D',
+            chassis: 'Atlas',
+            model: 'AS7-D',
+            bv: 1897,
+            as: { PV: 54 },
+        });
 
         component.setGameSystem(GameSystem.ALPHA_STRIKE);
         (component as any).__test.setPreviewResult({
@@ -1213,14 +1845,14 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('recomputes locked unit values when switching from Classic to Alpha Strike', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             bv: 1897,
             as: { PV: 54 },
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.CLASSIC,
@@ -1261,13 +1893,13 @@ describe('SearchForceGeneratorDialogComponent', () => {
     });
 
     it('does not regenerate the preview when a unit lock is toggled', () => {
-        const atlas = {
+        const atlas = createEmptyUnit({
             id: 1,
             name: 'Atlas AS7-D',
             chassis: 'Atlas',
             model: 'AS7-D',
             as: { PV: 6 },
-        } as Unit;
+        });
 
         (component as any).__test.setPreviewResult({
             gameSystem: GameSystem.ALPHA_STRIKE,

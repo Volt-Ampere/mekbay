@@ -2,7 +2,8 @@ import { GameSystem } from '../models/common.model';
 import { type Faction } from '../models/factions.model';
 import type { ASForceUnit } from '../models/as-force-unit.model';
 import type { UnitGroup } from '../models/force.model';
-import type { Unit } from '../models/units.model';
+import type { Unit, UnitSubtype } from '../models/units.model';
+import { createEmptyUnit, type TestUnitOverrides } from '../testing/unit-test-helpers';
 import { FormationAbilityAssignmentUtil } from './formation-ability-assignment.util';
 import { LanceTypeIdentifierUtil } from './lance-type-identifier.util';
 import type { FormationTypeDefinition } from './formation-type.model';
@@ -13,11 +14,13 @@ function createUnit(
     id: number,
     name: string,
     unitType: Unit['type'],
-    subtype: string,
+    subtype: UnitSubtype,
     tp: Unit['as']['TP'],
-    overrides: Partial<Omit<Unit, 'as'>> & { as?: Partial<Unit['as']> } = {},
+    overrides: TestUnitOverrides = {},
 ): Unit {
-    return {
+    const { as: asOverrides, ...unitOverrides } = overrides;
+
+    return createEmptyUnit({
         id,
         name,
         chassis: name,
@@ -25,67 +28,17 @@ function createUnit(
         year: 3050,
         weightClass: 'Heavy',
         tons: 70,
-        offSpeedFactor: 0,
-        bv: 0,
-        pv: 0,
-        cost: 0,
-        level: 0,
-        techBase: 'Inner Sphere',
-        techRating: 'D',
         type: unitType,
         subtype,
-        omni: 0,
-        engine: 'Fusion',
-        engineRating: 0,
-        engineHS: 0,
-        engineHSType: 'Heat Sink',
-        source: [],
         role: 'Brawler',
-        armorType: '',
-        structureType: '',
-        armor: 0,
-        armorPer: 0,
-        internal: 1,
-        heat: 0,
-        dissipation: 0,
-        moveType: unitType === 'Aero' ? 'a' : 'Tracked',
-        walk: 0,
-        walk2: 0,
-        run: 0,
-        run2: 0,
-        jump: 0,
-        jump2: 0,
-        umu: 0,
-        c3: '',
-        dpt: 0,
-        comp: [],
-        su: 0,
-        crewSize: 1,
-        quirks: [],
-        features: [],
-        icon: '',
-        sheets: [],
-        ...overrides,
+        moveType: unitType === 'Aero' ? 'Aerodyne' : 'Tracked',
+        ...unitOverrides,
         as: {
             TP: tp,
-            PV: 0,
             SZ: tp === 'AF' ? 2 : tp === 'BA' ? 1 : 3,
-            TMM: 0,
-            MV: '',
-            MVm: {},
-            ROLE: '',
-            SKILL: 4,
-            M: 0,
-            S: 0,
-            MSL: 0,
-            L: 0,
-            OV: 0,
-            ARM: 0,
-            STR: 0,
-            specials: [],
-            ...(overrides.as ?? {}),
+            ...asOverrides,
         },
-    } as unknown as Unit;
+    });
 }
 
 function createFaction(name: string, group: FactionAffinity): Faction {
@@ -244,8 +197,8 @@ describe('FormationAbilityAssignmentUtil', () => {
             createASForceUnit('bm-2', createUnit(2, 'Banshee', 'Mek', 'BattleMek', 'BM')),
         ];
         const flightUnits = [
-            createASForceUnit('flight-1', createUnit(10, 'Corsair', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 12 } } })),
-            createASForceUnit('flight-2', createUnit(11, 'Lucifer', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 } } })),
+            createASForceUnit('flight-1', createUnit(10, 'Corsair', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 12 } } })),
+            createASForceUnit('flight-2', createUnit(11, 'Lucifer', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 } } })),
         ];
         const allUnits = [...flightUnits, ...bmUnits];
         const group = createGroup(
@@ -407,12 +360,12 @@ describe('FormationAbilityAssignmentUtil', () => {
     it('auto-assigns all-unit command abilities through the formation preview', () => {
         const formation = getFormation('electronic-warfare-squadron');
         const units = [
-            createASForceUnit('unit-1', createUnit(1, 'Sholagar', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['ECM'] } })),
-            createASForceUnit('unit-2', createUnit(2, 'Corsair', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['PRB'] } })),
-            createASForceUnit('unit-3', createUnit(3, 'Lucifer', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['TAG'] } })),
-            createASForceUnit('unit-4', createUnit(4, 'Transit', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['AECM'] } })),
-            createASForceUnit('unit-5', createUnit(5, 'Sabre', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: [] } })),
-            createASForceUnit('unit-6', createUnit(6, 'Chippewa', 'Aero', 'Aero', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: [] } })),
+            createASForceUnit('unit-1', createUnit(1, 'Sholagar', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['ECM'] } })),
+            createASForceUnit('unit-2', createUnit(2, 'Corsair', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['PRB'] } })),
+            createASForceUnit('unit-3', createUnit(3, 'Lucifer', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['TAG'] } })),
+            createASForceUnit('unit-4', createUnit(4, 'Transit', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: ['AECM'] } })),
+            createASForceUnit('unit-5', createUnit(5, 'Sabre', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: [] } })),
+            createASForceUnit('unit-6', createUnit(6, 'Chippewa', 'Aero', 'Aerospace Fighter', 'AF', { role: 'Interceptor', as: { MVm: { a: 10 }, specials: [] } })),
         ];
         const group = createGroup(
             units,

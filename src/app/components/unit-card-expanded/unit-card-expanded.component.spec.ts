@@ -8,6 +8,7 @@ import { DialogsService } from '../../services/dialogs.service';
 import { GameService } from '../../services/game.service';
 import { MEGAMEK_RARITY_PRODUCTION_SORT_KEY } from '../../services/unit-search-filters.model';
 import { MEGAMEK_AVAILABILITY_BADGE_COLORS, MEGAMEK_AVAILABILITY_RARITY_ICON_COLORS, MEGAMEK_AVAILABILITY_UNKNOWN } from '../../models/megamek/availability.model';
+import { createEmptyUnit } from '../../testing/unit-test-helpers';
 import { UnitCardExpandedComponent } from './unit-card-expanded.component';
 
 describe('UnitCardExpandedComponent MegaMek availability display', () => {
@@ -27,13 +28,13 @@ describe('UnitCardExpandedComponent MegaMek availability display', () => {
     };
 
     function createUnit(): Unit {
-        return {
+        return createEmptyUnit({
             name: 'Atlas AS7-D',
             as: {
                 TP: 'BM',
                 MVm: {},
             },
-        } as Unit;
+        });
     }
 
     beforeEach(async () => {
@@ -64,7 +65,7 @@ describe('UnitCardExpandedComponent MegaMek availability display', () => {
         fixture.componentRef.setInput('sortKey', MEGAMEK_RARITY_PRODUCTION_SORT_KEY);
         fixture.componentRef.setInput('sortSlotLabel', 'RAT Rarity (P)');
         fixture.componentRef.setInput('sortSlotOverride', { value: 'Rare', numeric: false });
-        fixture.componentRef.setInput('megaMekAvailability', [{ source: 'Production', score: 4, rarity: 'Rare' }]);
+        fixture.componentRef.setInput('megaMekAvailability', [{ source: 'Requisition', score: 4, rarity: 'Rare' }]);
         fixture.detectChanges();
 
         expect(fixture.componentInstance.sortSlot()).toBeNull();
@@ -79,7 +80,7 @@ describe('UnitCardExpandedComponent MegaMek availability display', () => {
         fixture.componentRef.setInput('sortKey', MEGAMEK_RARITY_PRODUCTION_SORT_KEY);
         fixture.componentRef.setInput('sortSlotLabel', 'RAT Rarity (P)');
         fixture.componentRef.setInput('sortSlotOverride', { value: 'Rare', numeric: false });
-        fixture.componentRef.setInput('megaMekAvailability', [{ source: 'Production', score: 4, rarity: 'Rare' }]);
+        fixture.componentRef.setInput('megaMekAvailability', [{ source: 'Requisition', score: 4, rarity: 'Rare' }]);
         fixture.detectChanges();
 
         expect(fixture.componentInstance.getSortSlotForCompact(unit)).toBeNull();
@@ -90,17 +91,17 @@ describe('UnitCardExpandedComponent MegaMek availability display', () => {
 
         fixture.componentRef.setInput('unit', createUnit());
         fixture.componentRef.setInput('megaMekAvailability', [
-            { source: 'Production', score: 4, rarity: 'Rare' },
+            { source: 'Requisition', score: 4, rarity: 'Rare' },
             { source: 'Salvage', score: 7, rarity: 'Common' },
         ]);
         fixture.detectChanges();
 
         expect(fixture.componentInstance.megaMekAvailabilityTooltip()).toEqual([
-            { label: 'Production', value: 'Rare' },
+            { label: 'Requisition', value: 'Rare' },
             { label: 'Salvage', value: 'Common' },
         ]);
         expect(fixture.componentInstance.megaMekAvailabilityBadges()).toEqual([
-            { source: 'Production', score: 4, rarity: 'Rare', color: MEGAMEK_AVAILABILITY_BADGE_COLORS['Rare'] },
+            { source: 'Requisition', score: 4, rarity: 'Rare', color: MEGAMEK_AVAILABILITY_BADGE_COLORS['Rare'] },
             { source: 'Salvage', score: 7, rarity: 'Common', color: MEGAMEK_AVAILABILITY_BADGE_COLORS['Common'] },
         ]);
     });

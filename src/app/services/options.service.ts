@@ -49,6 +49,7 @@ const DEFAULT_OPTIONS: Options = {
     c3NetworkConnectionsAboveNodes: false,
     automaticallyConvertFiltersToSemantic: false,
     unitSearchExpandedViewLayout: 'panel-list-filters',
+    showFilteredComponents: false,
     unitSearchViewMode: 'list',
     forceOverviewViewMode: 'compact',
     printRosterSummary: false,
@@ -77,6 +78,15 @@ const DEFAULT_OPTIONS: Options = {
     forceGenLastPVMax: 300,
     forceGenLastMinUnitCount: 4,
     forceGenLastMaxUnitCount: 8,
+    forceGenLastGunnerySkillMin: 4,
+    forceGenLastGunnerySkillMax: 4,
+    forceGenLastPilotingSkillMin: 5,
+    forceGenLastPilotingSkillMax: 5,
+    forceGenLastMaxPilotSkillDelta: 1,
+    forceGenFailureSearchWindowMs: 300,
+    forceGenPreventDuplicateChassis: false,
+    forceGenUseTaggedQuantities: false,
+    forceGenUseUnitTagsAsChassisTags: false,
 };
 
 @Injectable({ providedIn: 'root' })
@@ -103,6 +113,7 @@ export class OptionsService {
         automaticallyConvertFiltersToSemantic: DEFAULT_OPTIONS.automaticallyConvertFiltersToSemantic,
         allowMultipleActiveSheets: DEFAULT_OPTIONS.allowMultipleActiveSheets,
         unitSearchExpandedViewLayout: DEFAULT_OPTIONS.unitSearchExpandedViewLayout,
+        showFilteredComponents: DEFAULT_OPTIONS.showFilteredComponents,
         unitSearchViewMode: DEFAULT_OPTIONS.unitSearchViewMode,
         forceOverviewViewMode: DEFAULT_OPTIONS.forceOverviewViewMode,
         ASVehiclesCriticalHitTable: DEFAULT_OPTIONS.ASVehiclesCriticalHitTable,
@@ -116,6 +127,15 @@ export class OptionsService {
         forceGenLastPVMax: DEFAULT_OPTIONS.forceGenLastPVMax,
         forceGenLastMinUnitCount: DEFAULT_OPTIONS.forceGenLastMinUnitCount,
         forceGenLastMaxUnitCount: DEFAULT_OPTIONS.forceGenLastMaxUnitCount,
+        forceGenLastGunnerySkillMin: DEFAULT_OPTIONS.forceGenLastGunnerySkillMin,
+        forceGenLastGunnerySkillMax: DEFAULT_OPTIONS.forceGenLastGunnerySkillMax,
+        forceGenLastPilotingSkillMin: DEFAULT_OPTIONS.forceGenLastPilotingSkillMin,
+        forceGenLastPilotingSkillMax: DEFAULT_OPTIONS.forceGenLastPilotingSkillMax,
+        forceGenLastMaxPilotSkillDelta: DEFAULT_OPTIONS.forceGenLastMaxPilotSkillDelta,
+        forceGenFailureSearchWindowMs: DEFAULT_OPTIONS.forceGenFailureSearchWindowMs,
+        forceGenPreventDuplicateChassis: DEFAULT_OPTIONS.forceGenPreventDuplicateChassis,
+        forceGenUseTaggedQuantities: DEFAULT_OPTIONS.forceGenUseTaggedQuantities,
+        forceGenUseUnitTagsAsChassisTags: DEFAULT_OPTIONS.forceGenUseUnitTagsAsChassisTags,
     });
 
     constructor() {
@@ -146,6 +166,7 @@ export class OptionsService {
             automaticallyConvertFiltersToSemantic: saved?.automaticallyConvertFiltersToSemantic ?? DEFAULT_OPTIONS.automaticallyConvertFiltersToSemantic,
             allowMultipleActiveSheets: saved?.allowMultipleActiveSheets ?? DEFAULT_OPTIONS.allowMultipleActiveSheets,
             unitSearchExpandedViewLayout: saved?.unitSearchExpandedViewLayout ?? DEFAULT_OPTIONS.unitSearchExpandedViewLayout,
+            showFilteredComponents: saved?.showFilteredComponents ?? DEFAULT_OPTIONS.showFilteredComponents,
             unitSearchViewMode: saved?.unitSearchViewMode ?? DEFAULT_OPTIONS.unitSearchViewMode,
             forceOverviewViewMode: saved?.forceOverviewViewMode ?? DEFAULT_OPTIONS.forceOverviewViewMode,
             ASVehiclesCriticalHitTable: saved?.ASVehiclesCriticalHitTable ?? DEFAULT_OPTIONS.ASVehiclesCriticalHitTable,
@@ -159,6 +180,15 @@ export class OptionsService {
             forceGenLastPVMax: saved?.forceGenLastPVMax ?? DEFAULT_OPTIONS.forceGenLastPVMax,
             forceGenLastMinUnitCount: saved?.forceGenLastMinUnitCount ?? DEFAULT_OPTIONS.forceGenLastMinUnitCount,
             forceGenLastMaxUnitCount: saved?.forceGenLastMaxUnitCount ?? DEFAULT_OPTIONS.forceGenLastMaxUnitCount,
+            forceGenLastGunnerySkillMin: saved?.forceGenLastGunnerySkillMin ?? DEFAULT_OPTIONS.forceGenLastGunnerySkillMin,
+            forceGenLastGunnerySkillMax: saved?.forceGenLastGunnerySkillMax ?? DEFAULT_OPTIONS.forceGenLastGunnerySkillMax,
+            forceGenLastPilotingSkillMin: saved?.forceGenLastPilotingSkillMin ?? DEFAULT_OPTIONS.forceGenLastPilotingSkillMin,
+            forceGenLastPilotingSkillMax: saved?.forceGenLastPilotingSkillMax ?? DEFAULT_OPTIONS.forceGenLastPilotingSkillMax,
+            forceGenLastMaxPilotSkillDelta: saved?.forceGenLastMaxPilotSkillDelta ?? DEFAULT_OPTIONS.forceGenLastMaxPilotSkillDelta,
+            forceGenFailureSearchWindowMs: saved?.forceGenFailureSearchWindowMs ?? DEFAULT_OPTIONS.forceGenFailureSearchWindowMs,
+            forceGenPreventDuplicateChassis: saved?.forceGenPreventDuplicateChassis ?? DEFAULT_OPTIONS.forceGenPreventDuplicateChassis,
+            forceGenUseTaggedQuantities: saved?.forceGenUseTaggedQuantities ?? DEFAULT_OPTIONS.forceGenUseTaggedQuantities,
+            forceGenUseUnitTagsAsChassisTags: saved?.forceGenUseUnitTagsAsChassisTags ?? DEFAULT_OPTIONS.forceGenUseUnitTagsAsChassisTags,
         });
     }
 

@@ -32,7 +32,7 @@
  */
 
 import { inject, Injectable } from '@angular/core';
-import type { Units } from '../models/units.model';
+import type { UnitFluffCatalog, UnitFluffCatalogEntry, UnitFluffCatalogMetadata, Units } from '../models/units.model';
 import type { Eras } from '../models/eras.model';
 import type { RawMULFactions } from '../models/mulfactions.model';
 import type { Options } from '../models/options.model';
@@ -41,10 +41,9 @@ import type { Sourcebooks } from '../models/sourcebook.model';
 import type { MegaMekFactionsData } from '../models/megamek/factions.model';
 import type { MegaMekAvailabilityData } from '../models/megamek/availability.model';
 import type { MegaMekRulesetsData } from '../models/megamek/rulesets.model';
-import type { MULUnitSources } from '../models/mul-unit-sources.model';
+import type { SarnaPageTitlesData } from '../models/sarna-page-titles.model';
 import type { RawEquipmentData } from '../models/equipment.model';
 import type { SerializedForce } from '../models/force-serialization';
-import type { DataService } from './data.service';
 import { DialogsService } from './dialogs.service';
 import type { SerializedSearchFilter } from './unit-search-filters.model';
 import {
@@ -62,9 +61,10 @@ import type { LinkedOAuthProvider } from '../models/account-auth.model';
  * Author: Drake
  */
 const DB_NAME = 'mekbay';
-const DB_VERSION = 12;
+const DB_VERSION = 13;
 const DB_STORE = 'store';
 const UNITS_KEY = 'units';
+const UNITS_FLUFF_METADATA_KEY = 'unitsFluff';
 const EQUIPMENT_KEY = 'equipment';
 const FACTIONS_KEY = 'factions';
 const MEGAMEK_FACTIONS_KEY = 'megamekFactions';
@@ -74,6 +74,7 @@ const ERAS_KEY = 'eras';
 const SOURCEBOOKS_KEY = 'sourcebooks';
 const SHEETS_STORE = 'sheetsStore';
 const CANVAS_STORE = 'canvasStore';
+const UNIT_FLUFF_STORE = 'unitFluffStore';
 const OPERATIONS_STORE = 'operationsStore';
 const FORCE_STORE = 'forceStore';
 const TAGS_STORE = 'tagsStore';
@@ -83,7 +84,21 @@ const ORGANIZATIONS_STORE = 'organizationsStore';
 const OPTIONS_KEY = 'options';
 const USER_KEY = 'user';
 const QUIRKS_KEY = 'quirks';
-const MUL_UNIT_SOURCES_KEY = 'mulUnitSources';
+const SARNA_PAGE_TITLES_KEY = 'sarnaPageTitles';
+
+const CATALOG_GENERAL_STORE_KEYS = [
+    UNITS_KEY,
+    UNITS_FLUFF_METADATA_KEY,
+    EQUIPMENT_KEY,
+    FACTIONS_KEY,
+    MEGAMEK_FACTIONS_KEY,
+    MEGAMEK_AVAILABILITY_KEY,
+    MEGAMEK_RULESETS_KEY,
+    ERAS_KEY,
+    SOURCEBOOKS_KEY,
+    QUIRKS_KEY,
+    SARNA_PAGE_TITLES_KEY,
+] as const;
 
 const MAX_SHEET_CACHE_COUNT = 5000; // Max number of sheets to cache
 
@@ -95,18 +110,12 @@ export interface StoredSheet {
     size: number; // Size of the blob in bytes
 }
 
-/**
- * Tag data keyed by tag name -> unit names array (V2 format)
- * Previously was unit name -> tags array (V1 format)
- */
+/** Tag data keyed by tag label -> unit names array. */
 export interface StoredTags {
     [tagName: string]: string[];
 }
 
-/**
- * Chassis tags keyed by tag name -> chassis key array (V2 format)
- * Previously was chassis|type key -> tags array (V1 format)
- */
+/** Chassis tags keyed by tag label -> chassis key array. */
 export interface StoredChassisTags {
     [tagName: string]: string[];
 }
@@ -164,18 +173,6 @@ export interface TagData {
     /** Format version: 3 for V3 format */
     formatVersion: 3;
     /** Timestamp of last modification for sync purposes */
-    timestamp: number;
-}
-
-/**
- * Legacy V1/V2 tag data format for migration.
- * V1: nameTags = { unitName: [tags] }, chassisTags = { chassisKey: [tags] }
- * V2: nameTags = { tag: [unitNames] }, chassisTags = { tag: [chassisKeys] }
- */
-export interface TagDataLegacy {
-    nameTags: Record<string, string[]>;
-    chassisTags: Record<string, string[]>;
-    formatVersion?: number;
     timestamp: number;
 }
 
@@ -365,6 +362,7 @@ export class DbService {
                 this.createStoreIfMissing(db, transaction, TAGS_STORE);
                 this.createStoreIfMissing(db, transaction, SAVED_SEARCHES_STORE);
                 this.createStoreIfMissing(db, transaction, CANVAS_STORE);
+                this.createStoreIfMissing(db, transaction, UNIT_FLUFF_STORE);
                 this.createStoreIfMissing(db, transaction, PUBLIC_TAGS_STORE);
                 this.createStoreIfMissing(db, transaction, OPERATIONS_STORE);
                 this.createStoreIfMissing(db, transaction, ORGANIZATIONS_STORE);
@@ -518,6 +516,41 @@ export class DbService {
         return await this.saveDataFromGeneralStore(unitsData, UNITS_KEY);
     }
 
+    public async getUnitFluffCatalogMetadata(): Promise<UnitFluffCatalogMetadata | null> {
+        return await this.getDataFromGeneralStore<UnitFluffCatalogMetadata>(UNITS_FLUFF_METADATA_KEY);
+    }
+
+    public async getUnitFluff(name: string): Promise<UnitFluffCatalogEntry | null> {
+        return await this.getDataFromStore<UnitFluffCatalogEntry>(name, UNIT_FLUFF_STORE);
+    }
+
+    public async saveUnitsFluff(unitsFluffData: UnitFluffCatalog): Promise<void> {
+        const db = await this.dbPromise;
+        if (!db) return; // Degraded mode - caller may keep an in-memory copy
+
+        const entries = Object.entries(unitsFluffData.fluff ?? {});
+        const metadata: UnitFluffCatalogMetadata = {
+            version: unitsFluffData.version,
+            etag: unitsFluffData.etag || '',
+            count: entries.length,
+        };
+
+        return new Promise<void>((resolve, reject) => {
+            const transaction = db.transaction([DB_STORE, UNIT_FLUFF_STORE], 'readwrite');
+            const generalStore = transaction.objectStore(DB_STORE);
+            const unitFluffStore = transaction.objectStore(UNIT_FLUFF_STORE);
+
+            unitFluffStore.clear();
+            for (const [name, fluff] of entries) {
+                unitFluffStore.put(fluff, name);
+            }
+            generalStore.put(metadata, UNITS_FLUFF_METADATA_KEY);
+
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+        });
+    }
+
     public async getFactions(): Promise<RawMULFactions | null> {
         return await this.getDataFromGeneralStore<RawMULFactions>(FACTIONS_KEY);
     }
@@ -590,74 +623,35 @@ export class DbService {
         return await this.saveDataFromGeneralStore(sourcebooksData, SOURCEBOOKS_KEY);
     }
 
-    public async getMULUnitSources(): Promise<MULUnitSources | null> {
-        return await this.getDataFromGeneralStore<MULUnitSources>(MUL_UNIT_SOURCES_KEY);
+    public async getSarnaPageTitles(): Promise<SarnaPageTitlesData | null> {
+        return await this.getDataFromGeneralStore<SarnaPageTitlesData>(SARNA_PAGE_TITLES_KEY);
     }
 
-    public async saveMULUnitSources(data: MULUnitSources): Promise<void> {
-        return await this.saveDataFromGeneralStore(data, MUL_UNIT_SOURCES_KEY);
-    }
-
-    public async getTags(): Promise<StoredTags | null> {
-        return await this.getDataFromStore<StoredTags>('main', TAGS_STORE);
-    }
-
-    public async saveTags(tags: StoredTags): Promise<void> {
-        return await this.saveDataToStore(tags, 'main', TAGS_STORE);
-    }
-
-    public async getChassisTags(): Promise<StoredChassisTags | null> {
-        return await this.getDataFromStore<StoredChassisTags>('chassis', TAGS_STORE);
-    }
-
-    public async saveChassisTags(tags: StoredChassisTags): Promise<void> {
-        return await this.saveDataToStore(tags, 'chassis', TAGS_STORE);
-    }
-
-    public async getTagsTimestamp(): Promise<number | null> {
-        return await this.getDataFromStore<number>('timestamp', TAGS_STORE);
-    }
-
-    public async saveTagsTimestamp(timestamp: number): Promise<void> {
-        return await this.saveDataToStore(timestamp, 'timestamp', TAGS_STORE);
+    public async saveSarnaPageTitles(data: SarnaPageTitlesData): Promise<void> {
+        return await this.saveDataFromGeneralStore(data, SARNA_PAGE_TITLES_KEY);
     }
 
     /**
      * Get all tag data in a single read transaction.
-     * Reads V3 format ('tags' key) if available, otherwise reads legacy V1 format ('main', 'chassis' keys).
-     * Returns null if no data exists, or TagData | TagDataLegacy depending on what's stored.
+     * Returns null if no tag data exists.
      */
-    public async getAllTagData(): Promise<TagData | TagDataLegacy | null> {
+    public async getAllTagData(): Promise<TagData | null> {
         const db = await this.dbPromise;
         if (!db) return null; // Degraded mode
         return new Promise((resolve, reject) => {
             const transaction = db.transaction(TAGS_STORE, 'readonly');
             const store = transaction.objectStore(TAGS_STORE);
 
-            // Try V3 format first
             const tagsRequest = store.get('tags');
-            // Also read legacy keys for migration
-            const mainRequest = store.get('main');
-            const chassisRequest = store.get('chassis');
             const timestampRequest = store.get('timestamp');
-            const formatVersionRequest = store.get('formatVersion');
 
             transaction.oncomplete = () => {
-                // If we have V3 'tags' key, return V3 format
                 if (tagsRequest.result) {
                     resolve({
                         tags: tagsRequest.result,
                         timestamp: timestampRequest.result || 0,
                         formatVersion: 3
                     } as TagData);
-                } else if (mainRequest.result || chassisRequest.result) {
-                    // Legacy V1 format
-                    resolve({
-                        nameTags: mainRequest.result || {},
-                        chassisTags: chassisRequest.result || {},
-                        timestamp: timestampRequest.result || 0,
-                        formatVersion: formatVersionRequest.result
-                    } as TagDataLegacy);
                 } else {
                     resolve(null);
                 }
@@ -666,9 +660,7 @@ export class DbService {
         });
     }
 
-    /**
-     * Save V3 tag data and clean up legacy keys.
-     */
+    /** Save tag data. */
     public async saveAllTagData(data: TagData): Promise<void> {
         const db = await this.dbPromise;
         if (!db) return; // Degraded mode
@@ -676,14 +668,10 @@ export class DbService {
             const transaction = db.transaction(TAGS_STORE, 'readwrite');
             const store = transaction.objectStore(TAGS_STORE);
 
-            // Save V3 format
+            // Save tag data
             store.put(data.tags, 'tags');
             store.put(data.timestamp, 'timestamp');
             store.put(3, 'formatVersion');
-
-            // Delete legacy keys (migration cleanup)
-            store.delete('main');
-            store.delete('chassis');
 
             transaction.oncomplete = () => resolve();
             transaction.onerror = () => reject(transaction.error);
@@ -748,15 +736,11 @@ export class DbService {
                 const currentPending: TagOp[] = pendingRequest.result || [];
                 const newPending = [...currentPending, ...ops];
                 
-                // Save V3 format
+                // Save tag data
                 store.put(tagData.tags, 'tags');
                 store.put(tagData.timestamp, 'timestamp');
                 store.put(3, 'formatVersion');
                 store.put(newPending, 'pendingOps');
-                
-                // Clean up legacy keys if they exist
-                store.delete('main');
-                store.delete('chassis');
             };
 
             transaction.oncomplete = () => resolve();
@@ -985,6 +969,46 @@ export class DbService {
             throw new Error('Force instance ID is required for saving.');
         }
         return await this.saveDataToStore(force, force.instanceId, FORCE_STORE);
+    }
+
+    public async updateForceTags(instanceId: string, tags: readonly string[]): Promise<SerializedForce | null> {
+        const db = await this.dbPromise;
+        if (!db) return null;
+
+        return new Promise<SerializedForce | null>((resolve, reject) => {
+            const transaction = db.transaction(FORCE_STORE, 'readwrite');
+            const store = transaction.objectStore(FORCE_STORE);
+            const request = store.get(instanceId);
+            let updatedForce: SerializedForce | null = null;
+
+            request.onsuccess = () => {
+                const force = request.result as SerializedForce | undefined;
+                if (!force) {
+                    return;
+                }
+
+                updatedForce = { ...force };
+                if (tags.length > 0) {
+                    updatedForce.tags = [...tags];
+                } else {
+                    delete updatedForce.tags;
+                }
+
+                store.put(updatedForce, instanceId);
+            };
+
+            request.onerror = () => {
+                reject(request.error);
+            };
+
+            transaction.oncomplete = () => {
+                resolve(updatedForce);
+            };
+
+            transaction.onerror = () => {
+                reject(transaction.error);
+            };
+        });
     }
     
     /**
@@ -1238,6 +1262,24 @@ export class DbService {
         await this.clearStore(CANVAS_STORE);
     }
 
+    public async clearCatalogCaches(): Promise<void> {
+        const db = await this.dbPromise;
+        if (!db) return; // Degraded mode
+
+        return new Promise<void>((resolve, reject) => {
+            const transaction = db.transaction([DB_STORE, UNIT_FLUFF_STORE], 'readwrite');
+            const store = transaction.objectStore(DB_STORE);
+
+            for (const key of CATALOG_GENERAL_STORE_KEYS) {
+                store.delete(key);
+            }
+            transaction.objectStore(UNIT_FLUFF_STORE).clear();
+
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+        });
+    }
+
     /**
      * Clear all local per-user object stores while preserving shared data kept in the general store.
      * The persisted USER_KEY entry is removed as part of the reset.
@@ -1246,7 +1288,9 @@ export class DbService {
         const db = await this.dbPromise;
         if (!db) return; // Degraded mode
 
-        const storesToClear = Array.from(db.objectStoreNames).filter(storeName => storeName !== DB_STORE);
+        const storesToClear = Array.from(db.objectStoreNames).filter(
+            storeName => storeName !== DB_STORE && storeName !== UNIT_FLUFF_STORE,
+        );
         const transactionStores = [DB_STORE, ...storesToClear];
 
         return new Promise<void>((resolve, reject) => {

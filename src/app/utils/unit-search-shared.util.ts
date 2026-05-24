@@ -44,16 +44,64 @@ const unitComponentCache = new WeakMap<Unit, UnitComponentData>();
 
 export function getMergedTags(unit: Unit): string[] {
     const merged = new Set<string>();
-    for (const tag of unit._chassisTags ?? []) merged.add(tag);
-    for (const tag of unit._nameTags ?? []) merged.add(tag);
+    for (const entry of unit._chassisTags ?? []) merged.add(entry.tag);
+    for (const entry of unit._nameTags ?? []) merged.add(entry.tag);
     for (const publicTag of unit._publicTags ?? []) merged.add(publicTag.tag);
     return Array.from(merged);
+}
+
+function normalizeSourceValues(value: readonly string[] | null | undefined): string[] {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    const result: string[] = [];
+    const seen = new Set<string>();
+
+    for (const entry of value) {
+        if (typeof entry !== 'string') {
+            continue;
+        }
+
+        const source = entry.trim();
+        const sourceKey = source.toLowerCase();
+        if (!source || sourceKey === 'none' || seen.has(sourceKey)) {
+            continue;
+        }
+
+        seen.add(sourceKey);
+        result.push(source);
+    }
+
+    return result;
+}
+
+export function getUnitSourceFilterValues(unit: Pick<Unit, 'source' | 'published'>): string[] {
+    const sources = normalizeSourceValues(unit.source);
+    const published = normalizeSourceValues(unit.published);
+
+    if (published.length === 0) {
+        return sources;
+    }
+
+    const merged = new Map<string, string>();
+    for (const source of sources) {
+        merged.set(source.toLowerCase(), source);
+    }
+    for (const source of published) {
+        merged.set(source.toLowerCase(), source);
+    }
+
+    return Array.from(merged.values());
 }
 
 export function getProperty(obj: any, key?: string) {
     if (!obj || !key) return undefined;
     if (key === '_tags') {
         return getMergedTags(obj as Unit);
+    }
+    if (key === 'source') {
+        return getUnitSourceFilterValues(obj as Unit);
     }
     if (key === 'as._motive') {
         const mvm = (obj as Unit).as?.MVm;
